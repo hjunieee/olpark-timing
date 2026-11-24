@@ -1,9 +1,13 @@
 name: 예보 갱신과 배포
 on:
   schedule:
-    - cron: '0 21 * * *'      # 매일 06:00 KST: 예보 다시 계산
-    - cron: '15,45 * * * *'   # 30분마다: 실시간 주차 대수만 갱신
+    - cron: '7 21 * * *'      # 매일 06:07 KST: 예보 다시 계산 (정각은 GitHub 혼잡으로 누락이 잦아 피함)
+    - cron: '17,47 * * * *'   # 30분마다: 실시간 주차 대수만 갱신
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'full: 예보 다시 계산, realtime: 실시간 대수만'
+        default: full
   push:
     branches: [main]
 permissions:
@@ -21,14 +25,14 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - name: 예보 계산
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 21 * * *'
+        if: (github.event_name == 'workflow_dispatch' && inputs.mode != 'realtime') || github.event.schedule == '7 21 * * *'
         env:
           CULTURE_KEY: ${{ secrets.CULTURE_KEY }}
         run: |
           pip install -r requirements.txt
           python pipeline/build.py --source "${{ vars.SOURCE || 'api2025' }}"
       - name: 결과 커밋
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 21 * * *'
+        if: (github.event_name == 'workflow_dispatch' && inputs.mode != 'realtime') || github.event.schedule == '7 21 * * *'
         run: |
           git config user.name "olpark-timing-bot"
           git config user.email "actions@users.noreply.github.com"
