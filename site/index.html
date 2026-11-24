@@ -64,7 +64,7 @@
       <div class="card-head"><h2 id="monthTitle"></h2>
         <div class="monthnav"><button class="nav" id="prevMonth" aria-label="이전 달">‹</button><button class="nav" id="nextMonth" aria-label="다음 달">›</button></div></div>
       <div class="cal" id="calendar"></div>
-      <p class="note">칸 색은 그날 가장 붐비는 시간의 예상 주차 대수 등급입니다. ●는 공연이 있는 날입니다. 날짜를 누르면 시간대별 예보로 이동합니다.</p>
+      <p class="note">칸 색은 그날 가장 가능성 높은 혼잡 등급입니다. ●는 공연이 있는 날입니다. 날짜를 누르면 시간대별 예보로 이동합니다.</p>
     </article>
   </section>
 
@@ -88,7 +88,7 @@
     <article class="card">
       <div class="card-head"><h2>앞으로 붐빌 날과 권장 조치</h2>
         <div class="opsbtn"><button class="nav wide" id="dlIcs">업무 달력(.ics)</button><button class="nav wide" id="dlCsv">시간별 예보(.csv)</button></div></div>
-      <p class="sub">주차 안내 인력 배치, 임시 주차장 개방, 사전 공지에 쓰도록 예보를 정리했습니다. 등급은 기관 '주차장 예상 이용률 안내'와 같은 기준(동2문·남2문·북2문 정원 2,200대의 50% 다소 혼잡, 70% 혼잡, 90% 만차)입니다. 만차 가능성은 2025년 기록으로 학습한 확률이며, 30% 이상인 날도 함께 보여 줍니다. 기관 안내는 주말 공연 시간대만 다루고, 이 목록은 평일과 공연 없는 날까지 60일을 다룹니다.</p>
+      <p class="sub">주차 안내 인력 배치, 임시 주차장 개방, 사전 공지에 쓰도록 예보를 정리했습니다. 등급은 기관 '주차장 예상 이용률 안내'와 같은 기준(동2문·남2문·북2문 정원 2,200대의 50% 다소 혼잡, 70% 혼잡, 90% 만차)입니다. 하루 등급은 2025년 기록으로 학습한 등급별 확률 중 가장 높은 것입니다. 혼잡 이상 확률이 50% 이상이거나 만차 확률이 30% 이상인 날을 보여 줍니다. 기관 안내는 주말 공연 시간대만 다루고, 이 목록은 평일과 공연 없는 날까지 60일을 다룹니다.</p>
       <div id="opsList"></div>
     </article>
   </section>
@@ -135,6 +135,6 @@
   <p>올팍타이밍은 2026년 한국체육산업개발(주) 공공데이터 활용 경진대회 출품작입니다. 예보는 참고용이며 실제 주차 상황과 다를 수 있습니다.</p>
   <p id="genStamp"></p>
 </footer>
-<script src="app.js?v=8"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

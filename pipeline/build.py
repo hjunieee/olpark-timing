@@ -235,24 +235,32 @@ class Combo:
         return np.clip(0.5 * self.a.predict(X) + 0.5 * self.b.predict(X), 0, None)
 
 
-RISK_F = ['offday', 'dome', 'bigd', 'hol_big', 'sun_d', 'tmax_d', 'rain_d', 'ev_day', 'before_off', 'd_price', 'pp']
+RISK_F = ['offday', 'dome', 'hol_big', 'sun_d', 'tmax_d', 'rain_d', 'd_price', 'pp', 'pb']
 
 
-def risk_table(X, peak_pred):
-    """하루 단위 만차 위험 특징. pp는 그날 예상 최대 대수."""
+def risk_table(X, peak_pred, peak_base):
+    """하루 단위 등급 확률 특징. pp는 모델의 예상 최대 대수, pb는 휴일·시간 평균의 최대 대수."""
     D = X.groupby(X.index.normalize()).first()
     D['pp'] = pd.Series(peak_pred).reindex(D.index).values
+    D['pb'] = pd.Series(peak_base).reindex(D.index).values
     return D[RISK_F].fillna(0)
 
 
-class Risk:
-    """만차(정원 90% 이상) 가능성: 표준화한 하루 특징의 로지스틱 회귀."""
-    def fit(self, Z, yfull):
+class GradeProb:
+    """하루 등급(여유~만차) 확률: 표준화한 하루 특징의 다항 로지스틱 회귀(규제 C=0.05)."""
+    def fit(self, Z, grade):
         self.mu, self.sd = Z.mean(), Z.std().replace(0, 1)
-        self.m = LogisticRegression(C=1.0, max_iter=2000).fit((Z - self.mu) / self.sd, yfull); return self
+        self.m = LogisticRegression(C=0.05, max_iter=5000).fit((Z - self.mu) / self.sd, grade); return self
 
     def predict(self, Z):
-        return self.m.predict_proba((Z - self.mu) / self.sd)[:, 1]
+        out = np.zeros((len(Z), 5))
+        out[:, self.m.classes_] = self.m.predict_proba((Z - self.mu) / self.sd)
+        return out
+
+
+def rps(P, t):
+    O = np.zeros_like(P); O[np.arange(len(t)), t] = 1
+    return float(np.mean(np.sum((np.cumsum(P, 1) - np.cumsum(O, 1)) ** 2, 1) / 4))
 
 
 def baseline(train_X, train_y, test_X):
@@ -336,18 +344,24 @@ def main():
                  'full_pred': int((gp >= 4).sum()), 'full_predHit': int(((gp >= 4) & full).sum()),
                  'full_predBase': int((gb >= 4).sum()), 'full_predHitBase': int(((gb >= 4) & full).sum())}
         print('등급', grade)
-        Zd = risk_table(X, pd.Series(peak_p.values, index=pd.to_datetime(peak_p.index)))
-        yfull = (peak_t.values >= 0.9 * CAP).astype(int)
-        rp = np.zeros(len(Zd))
+        Zd = risk_table(X, pd.Series(peak_p.values, index=pd.to_datetime(peak_p.index)),
+                        pd.Series(pb.values, index=pd.to_datetime(pb.index)))
+        offd = Zd.offday.values.astype(int)
+        PP, PC = np.zeros((len(Zd), 5)), np.zeros((len(Zd), 5))
         for mon in sorted(set(Zd.index.month)):
             tm = Zd.index.month == mon
-            rp[tm] = Risk().fit(Zd[~tm], yfull[~tm]).predict(Zd[tm])
-        risk_cv = {'auc': float(roc_auc_score(yfull, rp)), 'brier': float(brier_score_loss(yfull, rp)),
-                   'brierBase': float(brier_score_loss(yfull, np.full(len(yfull), yfull.mean()))),
-                   'fullDays': int(yfull.sum()), 'days': int(len(yfull)),
+            PP[tm] = GradeProb().fit(Zd[~tm], gt[~tm]).predict(Zd[tm])
+            for o in (0, 1):   # 비교 기준: 훈련 달의 휴일 여부별 등급 빈도
+                f = np.bincount(gt[~tm & (offd == o)], minlength=5) + 0.5
+                PC[tm & (offd == o)] = f / f.sum()
+        yfull = (gt >= 4).astype(int); rp = PP[:, 4]; busy = (gt >= 3).astype(int)
+        risk_cv = {'acc': float(np.mean(PP.argmax(1) == gt)), 'accBase': float(np.mean(gb == gt)),
+                   'rps': rps(PP, gt), 'rpsBase': rps(PC, gt),
+                   'busyBrier': float(np.mean((PP[:, 3:].sum(1) - busy) ** 2)), 'busyBrierBase': float(np.mean((PC[:, 3:].sum(1) - busy) ** 2)),
+                   'auc': float(roc_auc_score(yfull, rp)), 'fullDays': int(yfull.sum()), 'days': int(len(yfull)),
                    'hit30': int(((rp >= 0.3) & (yfull == 1)).sum()), 'flag30': int((rp >= 0.3).sum())}
-        risk_m = Risk().fit(Zd, yfull)
-        print('만차 위험', risk_cv)
+        risk_m = GradeProb().fit(Zd, gt)
+        print('등급 확률', risk_cv)
     print(f'휴일 MAE {mae_o:.0f}대 (기준 {mae_ob:.0f}대, {1 - mae_o / mae_ob:.1%} 감소), 일 최대 오차 {peak_err:.1%} (기준 {peak_err_b:.1%}), 공연 날 일 최대 오차 {pe_d:.1%} (기준 {pe_db:.1%})')
     print(f'검증 MAE {mae:.0f}대 (기준 {mae_b:.0f}대), 일 최대 오차 {peak_err:.1%}')
 
@@ -394,7 +408,8 @@ def main():
     risk_f = {}
     if risk_m is not None:
         fpk = pd.Series(pf, index=fut_idx).groupby(fut_idx.normalize()).max()
-        Zf = risk_table(Xf, fpk)
+        fpb = pd.Series(baseline(X, y, Xf), index=fut_idx).groupby(fut_idx.normalize()).max()
+        Zf = risk_table(Xf, fpk, fpb)
         risk_f = dict(zip(Zf.index.date, risk_m.predict(Zf)))
     days = []
     for d, g in pd.Series(pf, index=fut_idx).groupby(fut_idx.date):
@@ -410,7 +425,8 @@ def main():
         wxd = ({'tmax': float(wd.temp[ok].max()), 'tmin': float(wd.temp[ok].min()), 'rain': float(wd.rain[ok].sum()),
                 'pop': int(np.nanmax(wd['pop'][ok])) if wd['pop'][ok].notna().any() else None, 'src': wsrc} if ok.sum() >= 12 else {})
         days.append({'date': str(d), 'peak': max(hours[6:23]), 'hours': hours, 'events': evlist, 'wx': wxd,
-                     **({'risk': round(float(risk_f[d]), 3)} if d in risk_f else {}),
+                     **({'risk': round(float(risk_f[d][4]), 3), 'busy': round(float(risk_f[d][3:].sum()), 3),
+                         'grade': int(np.argmax(risk_f[d])), 'probs': [round(float(v), 3) for v in risk_f[d]]} if d in risk_f else {}),
                      'holiday': KR_HOL.get(d) or ''})
 
     gen = (dt.datetime.now(dt.UTC).replace(tzinfo=None) + dt.timedelta(hours=9)).strftime('%Y-%m-%d %H:%M KST')
