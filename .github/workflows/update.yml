@@ -1,0 +1,49 @@
+name: 예보 갱신과 배포
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 매일 06:00 KST
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: github.event_name != 'push'
+        with: { python-version: '3.12' }
+      - name: 예보 계산
+        if: github.event_name != 'push'
+        env:
+          CULTURE_KEY: ${{ secrets.CULTURE_KEY }}
+        run: |
+          pip install -r requirements.txt
+          python pipeline/build.py --source "${{ vars.SOURCE || 'file2024' }}"
+      - name: 결과 커밋
+        if: github.event_name != 'push'
+        run: |
+          git config user.name "olpark-timing-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add site/data raw/events
+          git diff --cached --quiet || git commit -m "예보 갱신 $(TZ=Asia/Seoul date +%F)"
+          git push
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
