@@ -25,6 +25,8 @@ DUR_MIN = 150
 
 
 def venue_info(place: str):
+    if (place or '').strip() == '올림픽공원':   # 공원 전역을 쓰는 야외 축제(예: 그랜드 민트 페스티벌)
+        return '올림픽공원 전역', 10.0, True
     p = (place or '').replace(' ', '')
     for key, w, big in VENUES:
         if key.replace(' ', '') in p:
@@ -105,6 +107,9 @@ def expand_events(events):
         dur = DUR_MIN
         m = re.search(r'(\d{2,3})\s*분', e.get('ndTm') or '')
         if m: dur = min(240, max(60, int(m.group(1)) + 15))
+        prices = [int(x.replace(',', '')) for x in re.findall(r'(\d{1,3}(?:,\d{3})+|\d{4,6})\s*원', e.get('tktPrc') or '')]
+        price = max(prices) / 1e4 if prices else np.nan
+        reg = pd.to_datetime((e.get('regDate') or '')[:10], errors='coerce')
         for d in days:
             dch = DOW_CH[d.dayofweek]
             ts = st.get(dch) or st.get('*')
@@ -114,7 +119,7 @@ def expand_events(events):
                 key = 'sat' if d.dayofweek == 5 else 'sun' if d.dayofweek == 6 or d in KR_HOL else 'weekday'
                 ts = [DEFAULT_START[key]]
             for t in ts:
-                rows.append(dict(date=d.normalize(), start=t, end=t + dur, venue=venue, w=w, big=big,
+                rows.append(dict(date=d.normalize(), start=t, end=t + dur, venue=venue, w=w, big=big, price=price, reg=reg,
                                  title=re.sub(r'\s+', ' ', e.get('title', '')).strip(), place=(e.get('plc') or '').strip()))
     return pd.DataFrame(rows)
 

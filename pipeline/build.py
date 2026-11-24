@@ -9,6 +9,7 @@ import argparse, datetime as dt, json, sys, time, urllib.request
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.linear_model import RidgeCV
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent))
 from common import *  # noqa
 
@@ -59,7 +60,7 @@ def load_io_file2024():
     return pd.DataFrame({'in': pd.to_datetime(df['입차일시']), 'out': pd.to_datetime(df['출차일시'])})
 
 
-EV_KEEP = ('evtSeq', 'title', 'beginDt', 'endDt', 'tm', 'plc', 'ndTm')
+EV_KEEP = ('evtSeq', 'title', 'beginDt', 'endDt', 'tm', 'plc', 'ndTm', 'tktPrc', 'regDate')
 
 
 def trim_events(raw):
@@ -95,33 +96,36 @@ def fetch_events(months):
 
 
 def weather_archive(start, end):
-    p = CACHE / f'wx_{start}_{end}.json'
+    p = CACHE / f'wx2_{start}_{end}.json'
     if not p.exists():
         url = (f'https://archive-api.open-meteo.com/v1/archive?latitude={LAT}&longitude={LON}&start_date={start}&end_date={end}'
-               '&hourly=temperature_2m,precipitation&timezone=Asia%2FSeoul')
+               '&hourly=temperature_2m,precipitation,sunshine_duration,cloud_cover&timezone=Asia%2FSeoul')
         p.write_bytes(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30).read())
     h = load_json(p)['hourly']
-    w = pd.DataFrame({'temp': h['temperature_2m'], 'rain': h['precipitation']}, index=pd.to_datetime(h['time']))
+    w = pd.DataFrame({'temp': h['temperature_2m'], 'rain': h['precipitation'], 'sun': h['sunshine_duration'], 'cloud': h['cloud_cover']},
+                     index=pd.to_datetime(h['time']))
     return w
 
 
 def weather_forecast():
     """앞으로 16일 시간별 예보(Open-Meteo)."""
-    url = (f'https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&hourly=temperature_2m,precipitation,precipitation_probability'
+    url = (f'https://api.open-meteo.com/v1/forecast?latitude={LAT}&longitude={LON}&hourly=temperature_2m,precipitation,precipitation_probability,sunshine_duration,cloud_cover'
            '&forecast_days=16&timezone=Asia%2FSeoul')
     try:
         h = json.loads(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30).read())['hourly']
-        return pd.DataFrame({'temp': h['temperature_2m'], 'rain': h['precipitation'], 'pop': h['precipitation_probability']},
+        return pd.DataFrame({'temp': h['temperature_2m'], 'rain': h['precipitation'], 'pop': h['precipitation_probability'],
+                             'sun': h['sunshine_duration'], 'cloud': h['cloud_cover']},
                             index=pd.to_datetime(h['time'])), 'Open-Meteo 예보'
     except Exception as e:
-        print('날씨 예보 실패', e); return pd.DataFrame(columns=['temp', 'rain', 'pop']), ''
+        print('날씨 예보 실패', e); return pd.DataFrame(columns=['temp', 'rain', 'pop', 'sun', 'cloud']), ''
 
 
 # ---------------- 특징 ----------------
 FEATS = ['hour', 'dow', 'offday', 'before_off', 'temp', 'rain', 'rain3', 'ev_pre', 'ev_on', 'ev_post', 'ev_day', 'ev_big_day']
 
 
-FEATS_2025 = ['dome', 'dome_h', 'hour', 'dow', 'offday', 'before_off', 'temp', 'rain', 'ev_pre', 'ev_on', 'ev_post', 'ev_day', 'ev_big_day']
+FEATS_2025 = ['dome', 'dome_h', 'hour', 'dow', 'offday', 'before_off', 'temp', 'rain', 'ev_pre', 'ev_on', 'ev_post', 'ev_day', 'ev_big_day',
+              'd_price', 'd_lead', 'hol_big', 'sun_d', 'cloud_d', 'tmax_d', 'rain_d']
 
 
 def make_X(idx, wx, ev):
@@ -132,10 +136,24 @@ def make_X(idx, wx, ev):
     dstart = dome.groupby('date').start.min() if len(dome) else pd.Series(dtype=float)
     X['dome'] = day.isin(list(dstart.index)).astype(int)
     X['dome_h'] = np.where(X.dome > 0, X.hour.values - day.map(lambda t: dstart.get(t, 0) / 60).values, -99)
+    # KSPO DOME 공연의 최고 티켓 가격(만 원)과 공연 정보 등록 후 지난 날수
+    dmeta = dome.groupby('date')[['price', 'reg']].first() if len(dome) and 'price' in dome else pd.DataFrame(columns=['price', 'reg'])
+    X['d_price'] = day.map(lambda t: dmeta['price'].get(t, np.nan)).values
+    X['d_lead'] = day.map(lambda t: (t - dmeta['reg'][t]).days if t in dmeta.index and pd.notna(dmeta['reg'][t]) else np.nan).values
     w = wx.reindex(idx)
     X['temp'] = w['temp'].values
     X['rain'] = w['rain'].fillna(0).values
     X['rain3'] = w['rain'].fillna(0).rolling(3, min_periods=1).sum().values
+    # 하루 단위 나들이 날씨: 9~18시 일조 시간·구름, 최고 기온, 강수 합
+    if 'sun' in w:
+        dw = w[(w.index.hour >= 9) & (w.index.hour <= 18)]
+        dd = pd.DataFrame({'sun_d': dw['sun'].groupby(dw.index.normalize()).sum() / 3600,
+                           'cloud_d': dw['cloud'].groupby(dw.index.normalize()).mean(),
+                           'rain_d': dw['rain'].fillna(0).groupby(dw.index.normalize()).sum()})
+        dd['tmax_d'] = w['temp'].groupby(w.index.normalize()).max()
+        for c in dd: X[c] = dd[c].reindex(day).values
+    # 설·추석 전날·당일·다음날: 귀성으로 공원이 빈다
+    X['hol_big'] = [int(any(k in (KR_HOL.get(d) or '') for k in ('설날', '추석')) and '대체' not in (KR_HOL.get(d) or '')) for d in day.date]
     return X
 
 
@@ -161,6 +179,52 @@ class Blend:
         t = [self.tab['mean'][k] if k in self.tab.index and self.tab['size'][k] >= 3 else self.base.get(k[::2], self.mean)
              for k in zip(X.offday, X.bigd, X.hour)]
         return 0.5 * np.clip(self.m.predict(X[FEATS_2025]), 0, None) + 0.5 * np.array(t)
+
+
+class LevelShape:
+    """하루 수준(9~21시 평균 대수)을 날씨·휴일·공연으로 릿지 회귀하고, 시간별 모양을 곱한다.
+    휴일이 1년에 80여 일뿐이라 적은 변수로 수준을 먼저 맞히는 편이 안정적이다."""
+    @staticmethod
+    def dfeat(D):
+        f = pd.DataFrame(index=D.index)
+        f['off'] = D.offday; f['dome'] = D.dome; f['big'] = D.bigd; f['offdome'] = D.offday * D.dome; f['offbig'] = D.offday * D.bigd
+        f['hol'] = D.hol_big; f['hol_off'] = D.hol_big * D.offday
+        f['sun'] = D.sun_d * D.offday; f['sun_w'] = D.sun_d * (1 - D.offday)
+        f['t'] = D.tmax_d; f['t2'] = (D.tmax_d - 20) ** 2 * D.offday; f['t2w'] = (D.tmax_d - 20) ** 2 * (1 - D.offday)
+        f['rain'] = np.log1p(D.rain_d) * D.offday; f['rain_w'] = np.log1p(D.rain_d) * (1 - D.offday)
+        f['before_off'] = D.before_off; f['fri'] = (D.dow == 4).astype(int); f['sunday'] = (D.dow == 6).astype(int)
+        f['ev_day'] = D.ev_day
+        return f.fillna(0)
+
+    @staticmethod
+    def skey(X):
+        return list(zip(X.offday, X.dome, np.clip(X.dome_h, -9, 6).astype(int), X.hour))
+
+    def fit(self, X, y):
+        day = X.index.normalize(); dm = (X.hour >= 9) & (X.hour <= 21)
+        D = X.groupby(day).first(); D['L'] = pd.Series(np.asarray(y)[dm.values], index=X.index[dm]).groupby(day[dm]).mean()
+        D = D.dropna(subset=['L']); D = D[D.L > 0]
+        self.r = RidgeCV(alphas=np.logspace(-2, 3, 20)).fit(self.dfeat(D), np.log(D.L))
+        Ld = D.L.reindex(day).values
+        r = pd.DataFrame({'k': self.skey(X), 'o': list(zip(X.offday, X.hour)), 'r': np.asarray(y) / Ld}).dropna()
+        self.ratio = r.groupby('k').r.agg(['mean', 'size']); self.ratio2 = r.groupby('o').r.mean()
+        return self
+
+    def predict(self, X):
+        day = X.index.normalize(); D = X.groupby(day).first()
+        L = pd.Series(np.exp(self.r.predict(self.dfeat(D))), index=D.index).reindex(day).values
+        rr = np.array([self.ratio['mean'][k] if k in self.ratio.index and self.ratio['size'][k] >= 3 else self.ratio2.get((k[0], k[3]), 1.0)
+                       for k in self.skey(X)])
+        return L * rr
+
+
+class Combo:
+    """2025 최종 모델: 일 수준×시간 모양(LevelShape)과 Blend를 반씩 섞는다."""
+    def fit(self, X, y):
+        self.a = LevelShape().fit(X, y); self.b = Blend().fit(X, y); return self
+
+    def predict(self, X):
+        return np.clip(0.5 * self.a.predict(X) + 0.5 * self.b.predict(X), 0, None)
 
 
 def baseline(train_X, train_y, test_X):
@@ -211,7 +275,7 @@ def main():
         p, b = np.zeros(len(y)), np.zeros(len(y))
         for mon in sorted(set(y.index.month)):
             te = y.index.month == mon
-            p[te] = Blend().fit(X[~te], y[~te]).predict(X[te])
+            p[te] = Combo().fit(X[~te], y[~te]).predict(X[te])
             b[te] = baseline(X[~te], y[~te], X[te])
         te = np.ones(len(y), bool); yt, tidx = y.values, y.index
     day_mask = ((X[te].hour >= 9) & (X[te].hour <= 21)).values
@@ -219,9 +283,19 @@ def main():
     peak_t = pd.Series(yt, index=tidx).groupby(lambda t: t.date()).max()
     peak_p = pd.Series(p, index=tidx).groupby(lambda t: t.date()).max()
     peak_err = np.mean(np.abs(peak_p - peak_t) / peak_t)
+    dome_m = day_mask & (X[te].dome > 0).values
+    mae_d, mae_db = np.mean(np.abs(p - yt)[dome_m]), np.mean(np.abs(b - yt)[dome_m])
+    print(f'KSPO DOME 공연 날 MAE {mae_d:.0f}대 (기준 {mae_db:.0f}대, {1 - mae_d / mae_db:.1%} 감소)')
+    off_m = day_mask & (X[te].offday > 0).values
+    mae_o, mae_ob = np.mean(np.abs(p - yt)[off_m]), np.mean(np.abs(b - yt)[off_m])
+    pb = pd.Series(b, index=tidx).groupby(lambda t: t.date()).max()
+    peak_err_b = np.mean(np.abs(pb - peak_t) / peak_t)
+    dd = pd.Series((X[te].dome > 0).values, index=tidx).groupby(lambda t: t.date()).max()
+    pe_d, pe_db = np.mean((np.abs(peak_p - peak_t) / peak_t)[dd]), np.mean((np.abs(pb - peak_t) / peak_t)[dd])
+    print(f'휴일 MAE {mae_o:.0f}대 (기준 {mae_ob:.0f}대, {1 - mae_o / mae_ob:.1%} 감소), 일 최대 오차 {peak_err:.1%} (기준 {peak_err_b:.1%}), 공연 날 일 최대 오차 {pe_d:.1%} (기준 {pe_db:.1%})')
     print(f'검증 MAE {mae:.0f}대 (기준 {mae_b:.0f}대), 일 최대 오차 {peak_err:.1%}')
 
-    m = fit(X, y) if a.source == 'file2024' else Blend().fit(X, y)  # 전체로 다시 학습
+    m = fit(X, y) if a.source == 'file2024' else Combo().fit(X, y)  # 전체로 다시 학습
 
     # 혼잡 등급 경계: 학습 기간 9~21시 점유의 분위수
     day_occ = y[(y.index.hour >= 9) & (y.index.hour <= 21)]
@@ -241,6 +315,11 @@ def main():
     wfut['temp'] = wf['temp'].reindex(fut_idx) if len(wf) else np.nan
     wfut['rain'] = wf['rain'].reindex(fut_idx) if len(wf) else np.nan
     wfut['pop'] = wf['pop'].reindex(fut_idx) if len(wf) else np.nan
+    for c in ('sun', 'cloud'):
+        if c in wx:
+            cl = wx.groupby([wx.index.month, wx.index.hour])[c].mean()
+            fill = pd.Series([cl.get((t.month, t.hour), np.nan) for t in fut_idx], index=fut_idx)
+            wfut[c] = (wf[c].reindex(fut_idx) if len(wf) and c in wf else pd.Series(np.nan, index=fut_idx)).fillna(fill)
     has_wx = wfut['temp'].notna()
     wfut['temp'] = wfut['temp'].fillna(pd.Series(fut_idx.hour, index=fut_idx).map(clim))
     wfut['rain'] = wfut['rain'].fillna(0)
@@ -300,7 +379,13 @@ def main():
         'metricNote': (f'학습 기간 마지막 {test_days}일을 떼어 두고, 앞부분만으로 학습한 모델이 그 기간을 얼마나 맞히는지 쟀습니다. '
                        if a.source == 'file2024' else
                        f'2025년 기록이 온전한 {len(set(y.index.month))}개 달({len(peak_t)}일)을 한 달씩 떼어 두고, 나머지 달로만 학습한 모델이 그 달을 얼마나 맞히는지 쟀습니다. ') +
-                      f'비교 기준은 휴일 여부와 시간대만 보는 평균값(오차 {mae_b:.0f}대)입니다.',
+                      f'비교 기준은 휴일 여부와 시간대만 보는 평균값(오차 {mae_b:.0f}대)입니다.' +
+                      (f' 휴일만 보면 {mae_ob:.0f}대 → {mae_o:.0f}대({1 - mae_o / mae_ob:.0%} 감소), KSPO DOME 공연 날은 {mae_db:.0f}대 → {mae_d:.0f}대({1 - mae_d / mae_db:.0%} 감소)입니다.'
+                       if a.source != 'file2024' else ''),
+        'domeMetric': {'mae': round(float(mae_d)), 'base': round(float(mae_db)), 'days': int(len(set(X[te].index[dome_m].date))),
+                       'peakErr': round(float(pe_d), 3), 'peakErrBase': round(float(pe_db), 3)},
+        'offMetric': {'mae': round(float(mae_o)), 'base': round(float(mae_ob)), 'days': int(len(set(X[te].index[off_m].date)))},
+        'peakErrBase': round(float(peak_err_b), 3),
         'seasonNote': season_note,
         'effect': effect,
         'effectNote': '학습 기간의 실제 하루 최대 주차 대수 평균입니다. 대형 공연은 KSPO DOME·핸드볼경기장·잔디마당 등 수천 명 규모 공연입니다.',
