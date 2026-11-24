@@ -285,7 +285,8 @@ def main():
          {'name': '올림픽공원 입출차 정보', 'org': '한국체육산업개발(주)', 'use': '시간대별 주차 대수 계산·학습', 'url': 'https://www.data.go.kr/data/15138735/fileData.do'}),
         {'name': '올림픽공원 공연정보', 'org': '한국체육산업개발(주)', 'use': '공연 일정·시작 시각·공연장 (공공데이터포털 등록, 올림픽공원 홈페이지 제공)', 'url': 'https://www.data.go.kr/data/3037877/openapi.do'},
         {'name': '주차장 혼잡도 정보', 'org': '한국체육산업개발(주)', 'use': '구역별 만차 시간 패턴', 'url': 'https://www.data.go.kr/data/15164156/fileData.do'},
-        {'name': '월별주차현황', 'org': '한국체육산업개발(주)', 'use': '계절별 방문 수요 보정', 'url': 'https://www.data.go.kr/data/15131671/fileData.do'},
+        *([{'name': '월별주차현황', 'org': '한국체육산업개발(주)', 'use': '계절별 방문 수요 보정', 'url': 'https://www.data.go.kr/data/15131671/fileData.do'}]
+          if a.source == 'file2024' else []),
         {'name': '과거 관측·16일 예보 날씨', 'org': 'Open-Meteo (CC BY 4.0)', 'use': '강수·기온 반영', 'url': 'https://open-meteo.com/'},
     ]
     stats = {

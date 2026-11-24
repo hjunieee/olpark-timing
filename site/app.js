@@ -24,13 +24,14 @@ async function load() {
   if (!fc) { $('#dayAdvice').textContent = '예보 데이터를 불러오지 못했습니다.'; return; }
   fc.days.forEach((d) => (state.byDate[d.date] = d));
   const today = kstToday();
-  state.date = state.byDate[today] ? today : fc.days[0].date;
+  const [hTab, hDate] = location.hash.replace('#', '').split('/');   // 공유 링크: #day/2026-12-05
+  state.date = state.byDate[hDate] ? hDate : state.byDate[today] ? today : fc.days[0].date;
   state.month = state.date.slice(0, 7);
   $('#datePick').min = fc.days[0].date; $('#datePick').max = fc.days[fc.days.length - 1].date;
   $('#genStamp').textContent = `예보 갱신: ${fc.generated} · 학습 데이터: ${fc.trainedOn}`;
   $('#legend').innerHTML = LV.map((n, i) => `<span><i class="lv${i}"></i>${n}</span>`).join('');
   renderDay(); renderMonth(); renderNow(); renderAbout();
-  const h = location.hash.replace('#', ''); if (['day', 'month', 'now', 'about'].includes(h)) showTab(h);
+  if (['day', 'month', 'now', 'about'].includes(hTab)) showTab(hTab);
 }
 
 /* ---------- 날짜별 예보 ---------- */
