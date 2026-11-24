@@ -227,7 +227,8 @@ def main():
     stats = {
         'metrics': [
             {'value': f'{mae:.0f}대', 'label': '시간대별 평균 오차 (9~21시)'},
-            {'value': f'{(1 - mae / mae_b):.0%}', 'label': '단순 평균 대비 오차 감소'},
+            ({'value': f'{(1 - mae / mae_b):.0%}', 'label': '단순 평균 대비 오차 감소'} if mae < mae_b * 0.98 else
+             {'value': f'{mae_b:.0f}대', 'label': '비교 기준(휴일·시간대 평균) 오차'}),
             {'value': f'{peak_err:.0%}', 'label': '하루 최대 주차 대수 오차율'},
             {'value': f'{len(io):,}건', 'label': '학습한 입출차 기록'},
         ],
