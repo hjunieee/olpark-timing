@@ -9,7 +9,8 @@ import argparse, datetime as dt, json, sys, time, urllib.request
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.linear_model import RidgeCV
+from sklearn.linear_model import RidgeCV, LogisticRegression
+from sklearn.metrics import roc_auc_score, brier_score_loss
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent))
 from common import *  # noqa
 
@@ -234,6 +235,26 @@ class Combo:
         return np.clip(0.5 * self.a.predict(X) + 0.5 * self.b.predict(X), 0, None)
 
 
+RISK_F = ['offday', 'dome', 'bigd', 'hol_big', 'sun_d', 'tmax_d', 'rain_d', 'ev_day', 'before_off', 'd_price', 'pp']
+
+
+def risk_table(X, peak_pred):
+    """하루 단위 만차 위험 특징. pp는 그날 예상 최대 대수."""
+    D = X.groupby(X.index.normalize()).first()
+    D['pp'] = pd.Series(peak_pred).reindex(D.index).values
+    return D[RISK_F].fillna(0)
+
+
+class Risk:
+    """만차(정원 90% 이상) 가능성: 표준화한 하루 특징의 로지스틱 회귀."""
+    def fit(self, Z, yfull):
+        self.mu, self.sd = Z.mean(), Z.std().replace(0, 1)
+        self.m = LogisticRegression(C=1.0, max_iter=2000).fit((Z - self.mu) / self.sd, yfull); return self
+
+    def predict(self, Z):
+        return self.m.predict_proba((Z - self.mu) / self.sd)[:, 1]
+
+
 def baseline(train_X, train_y, test_X):
     """비교 기준: 같은 (휴일 여부, 시간) 평균."""
     tab = pd.DataFrame({'k': list(zip(train_X.offday, train_X.hour)), 'y': train_y.values}).groupby('k').y.mean()
@@ -299,7 +320,7 @@ def main():
     peak_err_b = np.mean(np.abs(pb - peak_t) / peak_t)
     dd = pd.Series((X[te].dome > 0).values, index=tidx).groupby(lambda t: t.date()).max()
     pe_d, pe_db = np.mean((np.abs(peak_p - peak_t) / peak_t)[dd]), np.mean((np.abs(pb - peak_t) / peak_t)[dd])
-    grade = {}
+    grade, risk_cv, risk_m = {}, {}, None
     if a.source != 'file2024':
         thd = [CAP * r for r in LEVEL_PCT]
         g = lambda v: np.searchsorted(thd, v, side='right')
@@ -315,6 +336,18 @@ def main():
                  'full_pred': int((gp >= 4).sum()), 'full_predHit': int(((gp >= 4) & full).sum()),
                  'full_predBase': int((gb >= 4).sum()), 'full_predHitBase': int(((gb >= 4) & full).sum())}
         print('등급', grade)
+        Zd = risk_table(X, pd.Series(peak_p.values, index=pd.to_datetime(peak_p.index)))
+        yfull = (peak_t.values >= 0.9 * CAP).astype(int)
+        rp = np.zeros(len(Zd))
+        for mon in sorted(set(Zd.index.month)):
+            tm = Zd.index.month == mon
+            rp[tm] = Risk().fit(Zd[~tm], yfull[~tm]).predict(Zd[tm])
+        risk_cv = {'auc': float(roc_auc_score(yfull, rp)), 'brier': float(brier_score_loss(yfull, rp)),
+                   'brierBase': float(brier_score_loss(yfull, np.full(len(yfull), yfull.mean()))),
+                   'fullDays': int(yfull.sum()), 'days': int(len(yfull)),
+                   'hit30': int(((rp >= 0.3) & (yfull == 1)).sum()), 'flag30': int((rp >= 0.3).sum())}
+        risk_m = Risk().fit(Zd, yfull)
+        print('만차 위험', risk_cv)
     print(f'휴일 MAE {mae_o:.0f}대 (기준 {mae_ob:.0f}대, {1 - mae_o / mae_ob:.1%} 감소), 일 최대 오차 {peak_err:.1%} (기준 {peak_err_b:.1%}), 공연 날 일 최대 오차 {pe_d:.1%} (기준 {pe_db:.1%})')
     print(f'검증 MAE {mae:.0f}대 (기준 {mae_b:.0f}대), 일 최대 오차 {peak_err:.1%}')
 
@@ -358,6 +391,11 @@ def main():
         pf = pf * np.array([mf[t.month] for t in fut_idx])
         season_note = '월별주차현황(2023~2025 평균)으로 달마다 방문 수요 차이를 보정했다.'
 
+    risk_f = {}
+    if risk_m is not None:
+        fpk = pd.Series(pf, index=fut_idx).groupby(fut_idx.normalize()).max()
+        Zf = risk_table(Xf, fpk)
+        risk_f = dict(zip(Zf.index.date, risk_m.predict(Zf)))
     days = []
     for d, g in pd.Series(pf, index=fut_idx).groupby(fut_idx.date):
         hours = [round(float(v)) for v in g.values]
@@ -372,6 +410,7 @@ def main():
         wxd = ({'tmax': float(wd.temp[ok].max()), 'tmin': float(wd.temp[ok].min()), 'rain': float(wd.rain[ok].sum()),
                 'pop': int(np.nanmax(wd['pop'][ok])) if wd['pop'][ok].notna().any() else None, 'src': wsrc} if ok.sum() >= 12 else {})
         days.append({'date': str(d), 'peak': max(hours[6:23]), 'hours': hours, 'events': evlist, 'wx': wxd,
+                     **({'risk': round(float(risk_f[d]), 3)} if d in risk_f else {}),
                      'holiday': KR_HOL.get(d) or ''})
 
     gen = (dt.datetime.now(dt.UTC).replace(tzinfo=None) + dt.timedelta(hours=9)).strftime('%Y-%m-%d %H:%M KST')
@@ -394,7 +433,7 @@ def main():
         {'name': '올림픽공원 공연정보', 'org': '한국체육산업개발(주)', 'use': '공연 일정·시작 시각·공연장 (공공데이터포털 등록, 올림픽공원 홈페이지 제공)', 'url': 'https://www.data.go.kr/data/3037877/openapi.do'},
         {'name': '주차장 혼잡도 정보', 'org': '한국체육산업개발(주)', 'use': '구역별 만차 시간 패턴', 'url': 'https://www.data.go.kr/data/15164156/fileData.do'},
         {'name': '월별주차현황', 'org': '한국체육산업개발(주)', 'use': ('계절별 방문 수요 보정' if a.source == 'file2024' else '2023~2025 달별 수요 추세 비교'), 'url': 'https://www.data.go.kr/data/15131671/fileData.do'},
-        {'name': '실시간 주차현황', 'org': '한국체육산업개발(주)', 'use': '동2문·남2문·북2문 지금 주차 대수(30분마다)', 'url': 'https://www.data.go.kr/data/15168686/openapi.do'},
+        {'name': '실시간 주차현황', 'org': '한국체육산업개발(주)', 'use': '동2문·남2문·북2문 지금 주차 대수(30분마다, 같은 값을 공개하는 기관 홈페이지 예상 이용률 안내에서 받음)', 'url': 'https://www.data.go.kr/data/15168686/openapi.do'},
         {'name': '과거 관측·16일 예보 날씨', 'org': 'Open-Meteo (CC BY 4.0)', 'use': '강수·기온 반영', 'url': 'https://open-meteo.com/'},
     ]
     stats = {
@@ -416,6 +455,7 @@ def main():
         'offMetric': {'mae': round(float(mae_o)), 'base': round(float(mae_ob)), 'days': int(len(set(X[te].index[off_m].date)))},
         'peakErrBase': round(float(peak_err_b), 3),
         'grade': grade,
+        'risk': risk_cv,
         'seasonNote': season_note,
         'effect': effect,
         'effectNote': '학습 기간의 실제 하루 최대 주차 대수 평균입니다. 대형 공연은 KSPO DOME·핸드볼경기장·잔디마당 등 수천 명 규모 공연입니다.',

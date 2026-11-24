@@ -11,6 +11,8 @@ const kstToday = () => { const n = new Date(Date.now() + (9 * 60 + new Date().ge
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n) => Math.round(n).toLocaleString('ko-KR');
 const pct = (v) => (state.fc && state.fc.capacity ? ` (정원의 ${Math.round(v / state.fc.capacity * 100)}%)` : '');
+const riskText = (d) => (d.risk != null ? `만차 가능성 ${Math.round(d.risk * 100)}%` : '');
+const pctOf = (v) => (state.fc && state.fc.capacity ? Math.round(v / state.fc.capacity * 100) : null);
 const arriveText = (hours) => bestSlots(hours).good.map((g) => `${g.h}~${g.h + 2}시`).join(' 또는 ');
 
 function levelOf(cars, day = false) {
@@ -53,7 +55,7 @@ function renderDay() {
   const isToday = d.date === kstToday();
   $('#dateLabel').textContent = `${dt.getMonth() + 1}월 ${dt.getDate()}일 (${DOW[dt.getDay()]})${d.holiday ? ' · ' + d.holiday : ''}${isToday ? ' · 오늘' : ''}`;
   const lv = levelOf(d.peak, true);
-  $('#dayLevel').innerHTML = `<span class="badge lv${lv}">${LV[lv]}</span> 최대 약 ${fmt(d.peak)}대<small class="pct">${pct(d.peak)}</small>`;
+  $('#dayLevel').innerHTML = `<span class="badge lv${lv}">${LV[lv]}</span> 최대 약 ${fmt(d.peak)}대<small class="pct">${pct(d.peak)}${d.risk != null ? ' · ' + riskText(d) : ''}</small>`;
   const w = d.wx || {};
   $('#dayWx').innerHTML = w.tmax != null
     ? `<b>${Math.round(w.tmin)}° / ${Math.round(w.tmax)}°</b>${w.rain > 0.5 ? `비 ${w.rain.toFixed(0)}mm` : w.pop != null ? `강수확률 ${w.pop}%` : '비 소식 없음'}<br><small>${esc(w.src || '')}</small>`
@@ -65,7 +67,8 @@ function renderDay() {
   let adv;
   if (bigEv.length) {
     const e = bigEv[0];
-    adv = `${esc(e.place)}에서 ${esc(e.title)} 공연이 있습니다. 공연 시작 2시간 전부터 주차장이 빠르게 찹니다. ${arriveText(d.hours)}에 도착하거나 대중교통(5·8호선 올림픽공원역, 8호선 몽촌토성역)을 권합니다.`;
+    const h0 = Math.max(0, e.startH - 2), pre = d.hours[h0];
+    adv = `${esc(e.place)}에서 ${esc(e.title)} 공연(${esc(e.start)})이 있습니다.<br><b>공연 관객</b>: 시작 2시간 전(${h0}시)에 이미 약 ${fmt(pre)}대${pctOf(pre) != null ? `(정원의 ${pctOf(pre)}%)` : ''}로 예상됩니다. ${d.risk != null ? riskText(d) + '. ' : ''}대중교통(5·8호선 올림픽공원역, 8호선 몽촌토성역)을 권하고, 차로 오면 ${Math.max(9, h0 - 1)}시 전에 도착하세요.<br><b>산책·운동 방문객</b>: ${arriveText(d.hours)}이 여유롭습니다.`;
   } else if (lv >= 3) {
     adv = `평소보다 붐비는 날입니다. ${peakH}시 전후가 가장 붐빕니다. ${s.good[0].h}시 무렵 도착을 권합니다.`;
   } else if (lv === 2) {
@@ -165,13 +168,13 @@ function opsDays() {
     const lv = levelOf(d.peak, true), big = d.events.filter((e) => e.big);
     const win = busyWindow(d.hours, th[2]) || busyWindow(d.hours, th[1]);
     return { d, lv, big, win };
-  }).filter((x) => x.lv >= 3);
+  }).filter((x) => x.lv >= 3 || (x.d.risk || 0) >= 0.3);
 }
 function noticeText(x) {
   const dt = parse(x.d.date), md = `${dt.getMonth() + 1}월 ${dt.getDate()}일(${DOW[dt.getDay()]})`;
   const w = x.win ? `${x.win[0]}~${x.win[1]}시` : '오후';
   const ev = x.big.length ? ` ${x.big[0].place}에서 '${x.big[0].title}' 공연이 있습니다.` : '';
-  return `[주차 혼잡 예보] ${md} ${w} 올림픽공원 주차장(${state.fc.scope || '주요 주차장'})이 ${LV[x.lv]}${x.lv === 4 ? '될' : '할'} 것으로 예상됩니다(최대 약 ${fmt(x.d.peak)}대${pct(x.d.peak)}).${ev} 방문 시 ${TRANSIT}을 이용해 주시고, 차량은 ${arriveText(x.d.hours)}에 도착하시기 바랍니다.`;
+  return `[주차 혼잡 예보] ${md} ${w} 올림픽공원 주차장(${state.fc.scope || '주요 주차장'})이 ${LV[x.lv]}${x.lv === 4 ? '될' : '할'} 것으로 예상됩니다(최대 약 ${fmt(x.d.peak)}대${pct(x.d.peak)}).${ev}${x.big.length ? ` 공연 관람객께서는 ${TRANSIT}을 이용해 주시고, 차량은 공연 시작 3시간 전까지 도착해 주시기 바랍니다. 공원 산책·운동 방문은 ${arriveText(x.d.hours)}을 권합니다.` : ` 방문 시 ${TRANSIT}을 이용해 주시고, 차량은 ${arriveText(x.d.hours)}에 도착하시기 바랍니다.`}`;
 }
 function renderOps() {
   const list = opsDays();
@@ -180,10 +183,10 @@ function renderOps() {
     const dt = parse(x.d.date), w = x.win;
     const acts = [];
     if (w) acts.push(`주차 안내 인력: <b>${Math.max(7, w[0] - 1)}~${w[1]}시</b> 증원 (예상 최대 ${fmt(x.d.peak)}대${pct(x.d.peak)})`);
-    if (x.lv >= 4) acts.push('임시 주차장 개방·진입 통제 계획 준비');
+    if (x.lv >= 4 || (x.d.risk || 0) >= 0.4) acts.push(`임시 주차장 개방·진입 통제 계획 준비 (${riskText(x.d)})`);
     if (x.big.length) acts.push(`공연 종료 예상 ${x.big.map((e) => e.end).join('·')} 전후 출차 유도`);
     acts.push('3일 전 홈페이지 핫뉴스·SNS 공지 (아래 문안)');
-    return `<div class="ops"><h3><span class="badge lv${x.lv}">${LV[x.lv]}</span>${dt.getMonth() + 1}월 ${dt.getDate()}일 (${DOW[dt.getDay()]})${x.d.holiday ? ' · ' + esc(x.d.holiday) : ''}
+    return `<div class="ops"><h3><span class="badge lv${x.lv}">${LV[x.lv]}</span>${dt.getMonth() + 1}월 ${dt.getDate()}일 (${DOW[dt.getDay()]})${x.d.risk != null ? ` · <small>${riskText(x.d)}</small>` : ''}${x.d.holiday ? ' · ' + esc(x.d.holiday) : ''}
       <a href="#day/${x.d.date}" data-go="${x.d.date}">시간대별 보기</a></h3>
       ${x.big.length ? `<div class="note">${x.big.map((e) => `${esc(e.start)} ${esc(e.place)} · ${esc(e.title)}`).join('<br>')}</div>` : ''}
       <ul>${acts.map((a) => `<li>${a}</li>`).join('')}</ul>
