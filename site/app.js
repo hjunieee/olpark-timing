@@ -2,7 +2,7 @@
 const LV = ['한산', '보통', '붐빔', '혼잡', '매우 혼잡'];
 const DOW = ['일', '월', '화', '수', '목', '금', '토'];
 const $ = (s) => document.querySelector(s);
-const state = { fc: null, stats: null, zones: null, byDate: {}, date: null, month: null };
+const state = { fc: null, stats: null, zones: null, live: null, byDate: {}, date: null, month: null };
 
 const pad = (n) => String(n).padStart(2, '0');
 const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -19,8 +19,9 @@ function levelOf(cars, day = false) {
 
 async function load() {
   const get = (f) => fetch(`data/${f}?v=${Date.now() >> 20}`).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-  const [fc, stats, zones] = await Promise.all([get('forecast.json'), get('stats.json'), get('zones.json')]);
-  state.fc = fc; state.stats = stats; state.zones = zones;
+  const [fc, stats, zones, live] = await Promise.all([get('forecast.json'), get('stats.json'), get('zones.json'),
+    fetch(`data/now.json?t=${Date.now()}`).then((r) => (r.ok ? r.json() : null)).catch(() => null)]);
+  state.fc = fc; state.stats = stats; state.zones = zones; state.live = live;
   if (!fc) { $('#dayAdvice').textContent = '예보 데이터를 불러오지 못했습니다.'; return; }
   fc.days.forEach((d) => (state.byDate[d.date] = d));
   const today = kstToday();
@@ -30,8 +31,8 @@ async function load() {
   $('#datePick').min = fc.days[0].date; $('#datePick').max = fc.days[fc.days.length - 1].date;
   $('#genStamp').textContent = `예보 갱신: ${fc.generated} · 학습 데이터: ${fc.trainedOn}`;
   $('#legend').innerHTML = LV.map((n, i) => `<span><i class="lv${i}"></i>${n}</span>`).join('');
-  renderDay(); renderMonth(); renderNow(); renderAbout();
-  if (['day', 'month', 'now', 'about'].includes(hTab)) showTab(hTab);
+  renderDay(); renderMonth(); renderNow(); renderLive(); renderOps(); renderAbout();
+  if (['day', 'month', 'now', 'ops', 'about'].includes(hTab)) showTab(hTab);
 }
 
 /* ---------- 날짜별 예보 ---------- */
@@ -117,15 +118,7 @@ function renderMonth() {
 /* ---------- 실시간·구역 ---------- */
 function renderNow() {
   const z = state.zones;
-  if (!z) { $('#zonesNow').textContent = '구역 데이터를 불러오지 못했습니다.'; return; }
-  const map = { '원활': 0, '혼잡': 3, '만차': 4 };
-  if (z.now && z.now.zones.length) {
-    $('#nowStamp').textContent = `기준 ${z.now.stamp}`;
-    $('#zonesNow').innerHTML = z.now.zones.map((q) => `<div class="zone lv${map[q.level] ?? 1}"><b>${esc(q.zone)}</b>${esc(q.level)}${q.cars != null ? ` · ${fmt(q.cars)}대` : ''}</div>`).join('');
-    $('#nowNote').textContent = z.now.note || '';
-  } else {
-    $('#zonesNow').innerHTML = '<p class="note">실시간 자료가 아직 없습니다.</p>';
-  }
+  if (!z) { $('#zoneHeat').textContent = '구역 데이터를 불러오지 못했습니다.'; return; }
   const hrs = [...Array(24).keys()].filter((h) => h >= 7);
   const zs = Object.keys(z.heat);
   const mx = Math.max(1, ...zs.flatMap((k) => z.heat[k]));
@@ -139,6 +132,85 @@ function renderNow() {
   $('#zoneHeat').innerHTML = t + '</table><p class="note">' + esc(z.heatNote || '') + '</p>';
 }
 
+/* ---------- 실시간 주차 대수 ---------- */
+function renderLive() {
+  const L = state.live;
+  if (!L) { $('#live').innerHTML = '<p class="note">실시간 값을 아직 받지 못했습니다. 30분마다 다시 받습니다.</p>'; return; }
+  const r = L.parked / L.capacity, lv = r >= 0.9 ? 4 : r >= 0.7 ? 3 : r >= 0.5 ? 2 : r >= 0.3 ? 1 : 0;
+  $('#liveStamp').textContent = `${L.stamp} 기준${L.error ? ' · ' + L.error : ''}`;
+  $('#live').innerHTML = `<div class="live"><b>${fmt(L.parked)}대</b><span class="cap">/ ${fmt(L.capacity)}대 (동2문·남2문·북2문)</span>
+    <span class="badge lv${lv}">이용률 ${Math.round(r * 100)}%</span></div>
+    <div class="meter"><i class="lv${lv}" style="width:${Math.min(100, r * 100)}%"></i></div>`;
+  const today = kstToday(), lg = (L.log || []).slice(-48);
+  $('#liveChart').style.display = lg.length > 1 ? '' : 'none';
+  if (lg.length > 1) drawBars('#liveChart', lg.map((x, i) => ({ v: x.n, label: i % 6 ? '' : x.t.slice(11), tip: `${x.t} ${fmt(x.n)}대`, val: '', cls: `lv${Math.min(4, Math.floor(x.n / L.capacity / 0.25))}` })));
+  const ap = (L.agencyPred || []).map((x) => `${x.t.slice(5)} ${x.rate}%`).join(', ');
+  $('#liveNote').textContent = `${L.source}. 기관이 공개하는 값을 30분마다 받습니다. 장기 주차 차량은 출차 기록이 없어 실제보다 많게 잡힐 수 있습니다(기관 안내).` +
+    (ap ? ` 기관의 주말 공연 시간 예상 이용률: ${ap}.` : '');
+}
+
+/* ---------- 기관 운영 ---------- */
+const TRANSIT = '대중교통(5·8호선 올림픽공원역, 8호선 몽촌토성역)';
+function busyWindow(hours, th) {
+  let s = -1, e = -1;
+  for (let h = 7; h <= 22; h++) if (hours[h] >= th) { if (s < 0) s = h; e = h; }
+  return s < 0 ? null : [s, e + 1];
+}
+function opsDays() {
+  const th = state.fc.thresholds;          // 시간 단위 등급 경계
+  return state.fc.days.map((d) => {
+    const lv = levelOf(d.peak, true), big = d.events.filter((e) => e.big);
+    const win = busyWindow(d.hours, th[2]) || (lv >= 3 ? busyWindow(d.hours, th[1]) : null);
+    return { d, lv, big, win };
+  }).filter((x) => x.lv >= 3 || (x.big.length && x.lv >= 2));
+}
+function noticeText(x) {
+  const dt = parse(x.d.date), md = `${dt.getMonth() + 1}월 ${dt.getDate()}일(${DOW[dt.getDay()]})`;
+  const w = x.win ? `${x.win[0]}~${x.win[1]}시` : '오후';
+  const ev = x.big.length ? ` ${x.big[0].place}에서 '${x.big[0].title}' 공연이 있습니다.` : '';
+  return `[주차 혼잡 예보] ${md} ${w} 올림픽공원 주차장이 ${LV[x.lv]}할 것으로 예상됩니다.${ev} 방문 시 ${TRANSIT}을 이용해 주시고, 차량은 ${x.win && x.win[0] > 10 ? x.win[0] - 2 + '시 이전' : '오전'}에 도착하시기 바랍니다.`;
+}
+function renderOps() {
+  const list = opsDays();
+  if (!list.length) { $('#opsList').innerHTML = '<p class="note">앞으로 60일 동안 혼잡 이상으로 예상되는 날이 없습니다.</p>'; return; }
+  $('#opsList').innerHTML = list.map((x, i) => {
+    const dt = parse(x.d.date), w = x.win;
+    const acts = [];
+    if (w) acts.push(`주차 안내 인력: <b>${Math.max(7, w[0] - 1)}~${w[1]}시</b> 증원 (예상 최대 ${fmt(x.d.peak)}대)`);
+    if (x.lv >= 4) acts.push('임시 주차장 개방·진입 통제 계획 준비');
+    if (x.big.length) acts.push(`공연 종료 예상 ${x.big.map((e) => e.end).join('·')} 전후 출차 유도`);
+    acts.push('3일 전 홈페이지 핫뉴스·SNS 공지 (아래 문안)');
+    return `<div class="ops"><h3><span class="badge lv${x.lv}">${LV[x.lv]}</span>${dt.getMonth() + 1}월 ${dt.getDate()}일 (${DOW[dt.getDay()]})${x.d.holiday ? ' · ' + esc(x.d.holiday) : ''}
+      <a href="#day/${x.d.date}" data-go="${x.d.date}">시간대별 보기</a></h3>
+      ${x.big.length ? `<div class="note">${x.big.map((e) => `${esc(e.start)} ${esc(e.place)} · ${esc(e.title)}`).join('<br>')}</div>` : ''}
+      <ul>${acts.map((a) => `<li>${a}</li>`).join('')}</ul>
+      <textarea readonly id="nt${i}">${esc(noticeText(x))}</textarea>
+      <button class="nav wide copy" data-copy="nt${i}">공지 문안 복사</button></div>`;
+  }).join('');
+}
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function icsText() {
+  const z = (n) => String(n).padStart(2, '0'), stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const ev = opsDays().filter((x) => x.win).map((x) => {
+    const d = x.d.date.replace(/-/g, '');
+    return ['BEGIN:VEVENT', `UID:olpark-${d}@olpark-timing`, `DTSTAMP:${stamp}`,
+      `DTSTART;TZID=Asia/Seoul:${d}T${z(Math.max(7, x.win[0] - 1))}0000`, `DTEND;TZID=Asia/Seoul:${d}T${z(Math.min(23, x.win[1]))}0000`,
+      `SUMMARY:[올팍타이밍] 주차 ${LV[x.lv]} 예상 (최대 ${Math.round(x.d.peak)}대)`,
+      `DESCRIPTION:${noticeText(x).replace(/[,;]/g, ' ')}`, 'END:VEVENT'].join('\r\n');
+  });
+  return ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//olpark-timing//KO', 'CALSCALE:GREGORIAN', ...ev, 'END:VCALENDAR'].join('\r\n');
+}
+function csvText() {
+  const rows = ['날짜,시각,예상 주차 대수,하루 등급,공연'];
+  state.fc.days.forEach((d) => d.hours.forEach((v, h) => rows.push(
+    `${d.date},${h},${v},${LV[levelOf(d.peak, true)]},"${d.events.filter((e) => e.big).map((e) => e.title.replace(/"/g, "'")).join(' / ')}"`)));
+  return '\ufeff' + rows.join('\n');
+}
+
 /* ---------- 데이터·정확도 ---------- */
 function renderAbout() {
   const s = state.stats; if (!s) return;
@@ -147,6 +219,11 @@ function renderAbout() {
   if (s.effect) {
     drawBars('#effectChart', s.effect.map((e, i) => ({ v: e.v, label: e.label, tip: `${e.label}: 하루 최대 평균 ${fmt(e.v)}대 (${e.n}일)`, val: `${fmt(e.v)}대`, cls: `lv${Math.min(4, i)}` })));
     $('#effectNote').textContent = s.effectNote || '';
+  }
+  if (s.monthly) {
+    const mx = Math.max(...s.monthly.map((x) => x.v));
+    drawBars('#monthlyChart', s.monthly.map((x) => ({ v: x.v / 1000, label: x.label, tip: `${x.label} 평균 ${fmt(x.v)}대`, val: '', cls: `lv${Math.min(4, Math.max(0, Math.round((x.v / mx - 0.55) * 9)))}` })));
+    $('#monthlyNote').textContent = s.monthlyNote || '';
   }
   $('#sources').innerHTML = s.sources.map((x) => `<tr><td>${x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.name)}</a>` : esc(x.name)}</td><td>${esc(x.org)}</td><td>${esc(x.use)}</td></tr>`).join('');
 }
@@ -158,6 +235,7 @@ function showTab(t) {
   history.replaceState(null, '', '#' + t);
   if (t === 'about') renderAbout();
   if (t === 'day') renderDay();
+  if (t === 'now') renderLive();
 }
 document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
 function moveDay(n) {
@@ -175,6 +253,14 @@ document.querySelectorAll('.quick button').forEach((b) => b.onclick = () => {
 });
 $('#prevMonth').onclick = () => { const [y, m] = state.month.split('-').map(Number); const d = new Date(y, m - 2, 1); state.month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; renderMonth(); };
 $('#nextMonth').onclick = () => { const [y, m] = state.month.split('-').map(Number); const d = new Date(y, m, 1); state.month = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; renderMonth(); };
+$('#opsList').addEventListener('click', (e) => {
+  const c = e.target.closest('[data-copy]');
+  if (c) { const t = $('#' + c.dataset.copy); t.select(); navigator.clipboard?.writeText(t.value); c.textContent = '복사했습니다'; }
+  const g = e.target.closest('[data-go]');
+  if (g) { e.preventDefault(); state.date = g.dataset.go; state.month = state.date.slice(0, 7); renderDay(); renderMonth(); showTab('day'); }
+});
+$('#dlIcs').onclick = () => download('olpark-timing.ics', icsText(), 'text/calendar');
+$('#dlCsv').onclick = () => download('olpark-timing.csv', csvText(), 'text/csv');
 $('#calendar').addEventListener('click', (e) => { const b = e.target.closest('button.d'); if (b) { state.date = b.dataset.date; renderDay(); showTab('day'); } });
 window.addEventListener('resize', () => { if ($('#tab-day').classList.contains('on')) renderDay(); });
 load();

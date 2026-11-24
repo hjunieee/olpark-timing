@@ -113,3 +113,19 @@ table.src th{color:var(--muted);font-weight:600;border-top:0}
 .foot{color:var(--muted);font-size:.8rem;padding-bottom:30px}
 .foot p{margin:4px 0}
 .bar .val{position:absolute;top:6px;left:0;right:0;text-align:center;font-size:.8rem;font-weight:700}
+
+/* 실시간·기관 운영 */
+.live{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.live b{font-size:2rem}
+.live .cap{color:var(--muted)}
+.meter{height:12px;border-radius:999px;background:var(--bg);overflow:hidden;margin:8px 0 4px}
+.meter i{display:block;height:100%;border-radius:999px}
+.opsbtn{display:flex;gap:6px;flex-wrap:wrap}
+.nav.wide{width:auto;padding:0 12px}
+.ops{border-top:1px solid var(--line);padding:12px 0}
+.ops:first-child{border-top:0}
+.ops h3{margin:0 0 4px;font-size:1rem;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ops ul{margin:6px 0;padding-left:18px}
+.ops li{margin:2px 0}
+.ops textarea{width:100%;min-height:74px;font:inherit;font-size:.86rem;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--bg);color:inherit;box-sizing:border-box}
+.ops .copy{margin-top:4px}

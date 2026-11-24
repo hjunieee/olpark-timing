@@ -6,7 +6,7 @@
 <title>올팍타이밍 · 올림픽공원 혼잡 예보</title>
 <meta name="description" content="올림픽공원 입출차·공연·날씨 공공데이터로 만든 시간대별 주차 혼잡 예보와 방문 시간 추천 서비스">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230b6e4f'/%3E%3Cpath d='M16 8v8l6 4' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=5">
+<link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
 <header class="top">
@@ -16,6 +16,7 @@
       <button role="tab" data-tab="day" aria-selected="true">날짜별 예보</button>
       <button role="tab" data-tab="month">한 달 달력</button>
       <button role="tab" data-tab="now">실시간 주차</button>
+      <button role="tab" data-tab="ops">기관 운영</button>
       <button role="tab" data-tab="about">데이터·정확도</button>
     </nav>
   </div>
@@ -70,9 +71,10 @@
   <!-- 실시간 -->
   <section id="tab-now" class="tab">
     <article class="card">
-      <div class="card-head"><h2>주차구역 현황</h2><span class="stamp" id="nowStamp"></span></div>
-      <div class="zones" id="zonesNow"></div>
-      <p class="note" id="nowNote"></p>
+      <div class="card-head"><h2>지금 주차 대수</h2><span class="stamp" id="liveStamp"></span></div>
+      <div id="live"></div>
+      <div class="chart small" id="liveChart" role="img" aria-label="최근 실시간 주차 대수 추이"></div>
+      <p class="note" id="liveNote"></p>
     </article>
     <article class="card">
       <h2>주차구역별로 자주 차는 시간</h2>
@@ -81,14 +83,24 @@
     </article>
   </section>
 
+  <!-- 기관 운영 -->
+  <section id="tab-ops" class="tab">
+    <article class="card">
+      <div class="card-head"><h2>앞으로 붐빌 날과 권장 조치</h2>
+        <div class="opsbtn"><button class="nav wide" id="dlIcs">업무 달력(.ics)</button><button class="nav wide" id="dlCsv">시간별 예보(.csv)</button></div></div>
+      <p class="sub">주차 안내 인력 배치, 임시 주차장 개방, 사전 공지에 쓰도록 예보를 정리했습니다. 기관의 '주차장 예상 이용률 안내'는 주말 공연 시간대만 다루고, 이 목록은 평일과 공연 없는 날까지 60일을 다룹니다.</p>
+      <div id="opsList"></div>
+    </article>
+  </section>
+
   <!-- 데이터·정확도 -->
   <section id="tab-about" class="tab">
     <article class="card">
       <h2>예측은 이렇게 합니다</h2>
       <ol class="steps">
-        <li><b>과거 패턴 학습</b> 올림픽공원 시간대별 입출차 기록에 그 시각의 공연과 날씨를 붙여 학습합니다.</li>
+        <li><b>과거 패턴 학습</b> 2025년 입출차 240만 건으로 시각마다 주차장에 머문 차량 수를 세고, 그 시각의 공연·날씨(일조·기온·강수)·명절을 붙여 학습합니다.</li>
         <li><b>미래 조건 입력</b> 올림픽공원 공연정보(홈페이지 공연 일정)에서 앞으로의 공연 일정을, Open-Meteo 예보에서 날씨를 가져옵니다.</li>
-        <li><b>매일 새로 계산</b> 매일 아침 자동으로 데이터를 다시 받아 앞으로 60일의 시간대별 주차 대수를 계산합니다.</li>
+        <li><b>매일 새로 계산</b> 매일 아침 자동으로 앞으로 60일의 시간대별 주차 대수를 다시 계산합니다. 실시간 주차 대수는 30분마다 받습니다.</li>
       </ol>
     </article>
     <article class="card">
@@ -102,6 +114,11 @@
       <p class="note" id="effectNote"></p>
     </article>
     <article class="card">
+      <h2>달마다 얼마나 붐비나</h2>
+      <div class="chart small" id="monthlyChart"></div>
+      <p class="note" id="monthlyNote"></p>
+    </article>
+    <article class="card">
       <h2>사용한 공공데이터</h2>
       <table class="src"><thead><tr><th>데이터</th><th>제공기관</th><th>쓰임</th></tr></thead><tbody id="sources"></tbody></table>
       <p class="note">공공데이터포털(data.go.kr)·문화데이터광장(culture.go.kr) 자료를 이용했습니다. 이용허락범위와 출처표시 조건을 따릅니다.</p>
@@ -113,6 +130,6 @@
   <p>올팍타이밍은 2026년 한국체육산업개발(주) 공공데이터 활용 경진대회 출품작입니다. 예보는 참고용이며 실제 주차 상황과 다를 수 있습니다.</p>
   <p id="genStamp"></p>
 </footer>
-<script src="app.js?v=5"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

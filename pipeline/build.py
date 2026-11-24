@@ -359,13 +359,13 @@ def main():
     effect = [{'label': l, 'v': float(daily.peak[mk].mean()), 'n': int(mk.sum())} for l, mk in groups if mk.sum() > 0]
 
     sources = [
-        ({'name': '올림픽공원 입출차정보(2025)', 'org': '한국체육산업개발(주) · 문화데이터광장', 'use': '2025년 1년치 시간대별 주차 대수 계산·학습', 'url': 'https://www.culture.go.kr/data/openapi/openapiView.do?id=659&gubun=A'}
+        ({'name': '올림픽공원 입출차정보(전체구역, 2025)', 'org': '한국체육산업개발(주)', 'use': '240만 건으로 시간대별 주차 대수 계산·학습 (공공데이터포털 15159093, 문화데이터광장 API로 제공)', 'url': 'https://www.data.go.kr/data/15159093/openapi.do'}
          if a.source != 'file2024' else
          {'name': '올림픽공원 입출차 정보', 'org': '한국체육산업개발(주)', 'use': '시간대별 주차 대수 계산·학습', 'url': 'https://www.data.go.kr/data/15138735/fileData.do'}),
         {'name': '올림픽공원 공연정보', 'org': '한국체육산업개발(주)', 'use': '공연 일정·시작 시각·공연장 (공공데이터포털 등록, 올림픽공원 홈페이지 제공)', 'url': 'https://www.data.go.kr/data/3037877/openapi.do'},
         {'name': '주차장 혼잡도 정보', 'org': '한국체육산업개발(주)', 'use': '구역별 만차 시간 패턴', 'url': 'https://www.data.go.kr/data/15164156/fileData.do'},
-        *([{'name': '월별주차현황', 'org': '한국체육산업개발(주)', 'use': '계절별 방문 수요 보정', 'url': 'https://www.data.go.kr/data/15131671/fileData.do'}]
-          if a.source == 'file2024' else []),
+        {'name': '월별주차현황', 'org': '한국체육산업개발(주)', 'use': ('계절별 방문 수요 보정' if a.source == 'file2024' else '2023~2025 달별 수요 추세 비교'), 'url': 'https://www.data.go.kr/data/15131671/fileData.do'},
+        {'name': '실시간 주차현황', 'org': '한국체육산업개발(주)', 'use': '동2문·남2문·북2문 지금 주차 대수(30분마다)', 'url': 'https://www.data.go.kr/data/15168686/openapi.do'},
         {'name': '과거 관측·16일 예보 날씨', 'org': 'Open-Meteo (CC BY 4.0)', 'use': '강수·기온 반영', 'url': 'https://open-meteo.com/'},
     ]
     stats = {
@@ -390,10 +390,24 @@ def main():
         'effect': effect,
         'effectNote': '학습 기간의 실제 하루 최대 주차 대수 평균입니다. 대형 공연은 KSPO DOME·핸드볼경기장·잔디마당 등 수천 명 규모 공연입니다.',
         'sources': sources,
+        **monthly_trend(),
     }
     save_json(stats, SITE_DATA / 'stats.json')
     build_zones()
     print('완료', gen, len(days), '일')
+
+
+def monthly_trend():
+    """월별주차현황(올림픽공원) 2023~2025: 달별 평균과 해마다 합계."""
+    m = pd.read_csv(DATA_DIR / 'dl' / '15131671.bin', encoding='cp949')
+    m = m[m['주차장소'] == '올림픽공원'].copy()
+    m['mon'] = m['월'].str.replace('월', '').astype(int)
+    avg = m.groupby('mon')['주차대수'].mean()
+    tot = m.groupby('연도')['주차대수'].sum()
+    top = avg.sort_values(ascending=False).index[:2]
+    return {'monthly': [{'label': f'{k}월', 'v': float(v)} for k, v in avg.items()],
+            'monthlyNote': f"월별주차현황(공공데이터포털 15131671) {tot.index.min()}~{tot.index.max()}년 달별 평균입니다. 해마다 합계는 "
+                           + ', '.join(f'{y}년 {v:,}대' for y, v in tot.items()) + f"이고, {top[0]}월과 {top[1]}월이 가장 붐빕니다. 집계 범위가 달라 입출차 기록보다 대수가 적습니다."}
 
 
 def month_factors(train_month):
