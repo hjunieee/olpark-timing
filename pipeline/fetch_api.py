@@ -64,10 +64,69 @@ def fetch_all(api_id, rows=1000, max_pages=5000):
         time.sleep(0.2)
 
 
+DESC_RE = None
+
+
+def parse_659(txt):
+    """659 응답 한 쪽 → (입구, 입차, 출구, 출차) 행 목록."""
+    import re
+    global DESC_RE
+    DESC_RE = DESC_RE or re.compile(r'입구:([^,]*), 입차시간:([^,]*), 출구:([^,]*), 출차시간:(.*)$')
+    items = json.loads(txt)['response']['body']['items']
+    items = items.get('item', []) if isinstance(items, dict) else []
+    if isinstance(items, dict): items = [items]
+    out = []
+    for it in items:
+        m = DESC_RE.match((it.get('DESCRIPTION') or '').strip())
+        if m: out.append([x.strip() for x in m.groups()])
+    return out
+
+
+def fetch_659(rows=5000):
+    """2025 입출차 전체를 cache/api_659/NNNNN.csv로 받는다. 429면 쉬었다 다시 한다."""
+    import csv
+    d = CACHE / 'api_659'; d.mkdir(exist_ok=True)
+    total = None
+    for wait in (5, 30, 60, 120, 300):
+        try: total = int(json.loads(get('659', 1, 1))['response']['body']['totalCount']); break
+        except Exception as e: print('재시도 0', str(e)[:80], flush=True); time.sleep(wait)
+    if total is None: raise SystemExit('전체 건수 조회 실패')
+    time.sleep(2)
+    pages = (total + rows - 1) // rows
+    print('659 전체', total, '건,', pages, '쪽', flush=True)
+    for p in range(1, pages + 1):
+        f = d / f'{p:05d}.csv'
+        if f.exists(): continue
+        for wait in (2, 5, 15, 30, 60, 120, 300):
+            try:
+                recs = parse_659(get('659', p, rows)); break
+            except Exception as e:
+                print('재시도', p, str(e)[:80], flush=True); time.sleep(wait)
+        else:
+            raise SystemExit(f'{p}쪽 실패')
+        with open(f, 'w', newline='', encoding='utf-8') as fh:
+            csv.writer(fh).writerows(recs)
+        if p % 25 == 0: print(p, '/', pages, flush=True)
+        time.sleep(2.0)
+    print('DONE_659', flush=True)
+
+
+def load_io_2025():
+    """cache/api_659/*.csv → in/out 시각 DataFrame (2025년, 중복 제거)."""
+    import pandas as pd
+    fs = sorted((CACHE / 'api_659').glob('*.csv'))
+    df = pd.concat([pd.read_csv(f, header=None, names=['gin', 'in', 'gout', 'out'], dtype=str) for f in fs], ignore_index=True)
+    df = df.drop_duplicates()
+    io = pd.DataFrame({'in': pd.to_datetime(df['in'], errors='coerce'), 'out': pd.to_datetime(df['out'], errors='coerce'),
+                       'gin': df['gin'], 'gout': df['gout']})
+    return io.dropna(subset=['in'])
+
+
 if __name__ == '__main__':
     load_env()
     cmd = sys.argv[1] if len(sys.argv) > 1 else 'probe'
     if cmd == 'probe': probe()
+    elif cmd == '659': fetch_659()
     else:
         for i in (sys.argv[2:] or APIS):
             fetch_all(i)

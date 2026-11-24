@@ -28,6 +28,32 @@ def hourly_occupancy(io: pd.DataFrame, start, end):
     return pd.Series(occ, index=idx, name='occ')
 
 
+def occ_2025(t0, t1):
+    """2025 시간별 주차 대수. raw/occ_2025.json(집계본, 커밋함)이 있으면 쓰고, 없으면 API 캐시에서 만든다.
+    집계본에는 시간별 대수만 들어 있어 차량 단위 기록·키가 저장소에 남지 않는다."""
+    p = DATA_DIR / 'occ_2025.json'
+    if not p.exists():
+        import fetch_api
+        io = fetch_api.load_io_2025()
+        io = io[(io['in'] >= t0) & (io['in'] <= t1 + ' 23:59:59')]
+        y = hourly_occupancy(io, t0, t1 + ' 23:00')
+        # API는 달마다 최대 65,534건만 준다. 그 상한에 걸린 달은 표본(8·9월)이거나 앞 며칠만(11·12월) 들어 있다.
+        day_n = io['in'].dt.normalize().value_counts()
+        valid = []
+        for mon, g in day_n.groupby(day_n.index.month):
+            g = g.sort_index()
+            if 65000 <= g.sum() <= 65535:
+                if len(g) >= 25: continue                      # 한 달 전체에서 뽑은 표본 → 대수가 맞지 않아 뺀다
+                g = g.iloc[:-1]                                 # 마지막 날은 중간에 잘렸다
+            valid += [d.strftime('%Y-%m-%d') for d in g.index]
+        save_json({'start': t0, 'records': int(len(io)), 'occ': [int(v) for v in y.values], 'validDays': sorted(valid),
+                   'source': '문화데이터광장 OpenAPI 659 올림픽공원 입출차정보(2025)'}, p)
+    d = load_json(p)
+    y = pd.Series(d['occ'], index=pd.date_range(d['start'], periods=len(d['occ']), freq='h'), name='occ')
+    y = y[y.index.normalize().isin(pd.to_datetime(d['validDays']))]
+    return y, d['records']
+
+
 def load_io_file2024():
     df = pd.read_csv(DATA_DIR / 'dl' / '15138735.bin', encoding='cp949')
     return pd.DataFrame({'in': pd.to_datetime(df['입차일시']), 'out': pd.to_datetime(df['출차일시'])})
@@ -95,8 +121,17 @@ def weather_forecast():
 FEATS = ['hour', 'dow', 'offday', 'before_off', 'temp', 'rain', 'rain3', 'ev_pre', 'ev_on', 'ev_post', 'ev_day', 'ev_big_day']
 
 
+FEATS_2025 = ['dome', 'dome_h', 'hour', 'dow', 'offday', 'before_off', 'temp', 'rain', 'ev_pre', 'ev_on', 'ev_post', 'ev_day', 'ev_big_day']
+
+
 def make_X(idx, wx, ev):
     X = calendar_feats(idx).join(event_feats(idx, ev))
+    day = idx.normalize()
+    X['bigd'] = (X.groupby(day).ev_big_day.transform('max') > 0).astype(int).values
+    dome = ev[ev.place.str.contains('KSPO', na=False)] if len(ev) else ev
+    dstart = dome.groupby('date').start.min() if len(dome) else pd.Series(dtype=float)
+    X['dome'] = day.isin(list(dstart.index)).astype(int)
+    X['dome_h'] = np.where(X.dome > 0, X.hour.values - day.map(lambda t: dstart.get(t, 0) / 60).values, -99)
     w = wx.reindex(idx)
     X['temp'] = w['temp'].values
     X['rain'] = w['rain'].fillna(0).values
@@ -109,6 +144,23 @@ def fit(X, y):
     m = HistGradientBoostingRegressor(max_iter=400, learning_rate=0.05, max_leaf_nodes=31, l2_regularization=1.0,
                                       categorical_features=[feats.index('dow')], random_state=0)
     return m.fit(X[feats], y)
+
+
+class Blend:
+    """2025용: 규제를 세게 건 부스팅 예측과 (휴일·대형공연 유무·시간) 평균을 반씩 섞는다.
+    공연이 있는 날이 1년에 80여 일뿐이라 부스팅만 쓰면 공연 날에 과하게 맞춘다."""
+    def fit(self, X, y):
+        self.m = HistGradientBoostingRegressor(max_iter=300, learning_rate=0.04, max_leaf_nodes=15, min_samples_leaf=200,
+                                               l2_regularization=5.0, categorical_features=[FEATS_2025.index('dow')], random_state=0)
+        self.m.fit(X[FEATS_2025], y)
+        self.tab = pd.DataFrame({'k': list(zip(X.offday, X.bigd, X.hour)), 'y': np.asarray(y)}).groupby('k').y.agg(['mean', 'size'])
+        self.base = pd.DataFrame({'k': list(zip(X.offday, X.hour)), 'y': np.asarray(y)}).groupby('k').y.mean()
+        self.mean = float(np.mean(y)); return self
+
+    def predict(self, X):
+        t = [self.tab['mean'][k] if k in self.tab.index and self.tab['size'][k] >= 3 else self.base.get(k[::2], self.mean)
+             for k in zip(X.offday, X.bigd, X.hour)]
+        return 0.5 * np.clip(self.m.predict(X[FEATS_2025]), 0, None) + 0.5 * np.array(t)
 
 
 def baseline(train_X, train_y, test_X):
@@ -129,11 +181,13 @@ def main():
         trained_on = '2024년 7월 올림픽공원 입출차 21만 건'
         test_days = 10
     else:
-        import fetch_api
-        io = fetch_api.load_io_2025(); t0, t1 = '2025-01-01', '2025-12-31'
-        trained_on = '2025년 올림픽공원 입출차 1년치'
+        t0, t1 = '2025-01-01', '2025-12-31'
+        y, n_rec = occ_2025(t0, t1)
+        io = range(n_rec)
+        trained_on = f'2025년 올림픽공원 입출차 {n_rec / 10000:.0f}만 건(1년치)'
         test_days = 61   # 11~12월을 검증용으로 뗀다
-    y = hourly_occupancy(io, t0, t1 + ' 23:00')
+    if a.source == 'file2024':
+        y = hourly_occupancy(io, t0, t1 + ' 23:00')
     months = sorted({d.strftime('%Y%m') for d in pd.date_range(t0, t1)})
     today = pd.Timestamp(dt.datetime.now(dt.UTC).replace(tzinfo=None) + dt.timedelta(hours=9)).normalize()
     fut_idx = pd.date_range(today, today + pd.Timedelta(days=a.days) - pd.Timedelta('1h'), freq='h')
@@ -145,21 +199,29 @@ def main():
     wx = weather_archive(t0, t1)
     X = make_X(y.index, wx, ev)
 
-    # 시간 순서로 나눠 검증 (뒤쪽 test_days 일)
-    cut = y.index.max().normalize() - pd.Timedelta(days=test_days - 1)
-    tr, te = y.index < cut, y.index >= cut
-    m = fit(X[tr], y[tr])
-    p = np.clip(m.predict(X[te][FEATS]), 0, None)
-    b = baseline(X[tr], y[tr], X[te])
-    yt = y[te].values
-    day_mask = (X[te].hour >= 9) & (X[te].hour <= 21)
+    # 시간 순서로 나눠 검증 (뒤쪽 test_days 일, 2025는 10월부터)
+    if a.source == 'file2024':
+        cut = y.index.max().normalize() - pd.Timedelta(days=test_days - 1)
+        tr, te = y.index < cut, y.index >= cut
+        m = fit(X[tr], y[tr])
+        p = np.clip(m.predict(X[te][FEATS]), 0, None)
+        b = baseline(X[tr], y[tr], X[te])
+        yt, tidx = y[te].values, y.index[te]
+    else:   # 달마다 한 달을 떼어 두고 나머지 달로 학습해 맞힌다
+        p, b = np.zeros(len(y)), np.zeros(len(y))
+        for mon in sorted(set(y.index.month)):
+            te = y.index.month == mon
+            p[te] = Blend().fit(X[~te], y[~te]).predict(X[te])
+            b[te] = baseline(X[~te], y[~te], X[te])
+        te = np.ones(len(y), bool); yt, tidx = y.values, y.index
+    day_mask = ((X[te].hour >= 9) & (X[te].hour <= 21)).values
     mae, mae_b = np.mean(np.abs(p - yt)[day_mask]), np.mean(np.abs(b - yt)[day_mask])
-    peak_t = pd.Series(yt, index=y.index[te]).groupby(lambda t: t.date()).max()
-    peak_p = pd.Series(p, index=y.index[te]).groupby(lambda t: t.date()).max()
+    peak_t = pd.Series(yt, index=tidx).groupby(lambda t: t.date()).max()
+    peak_p = pd.Series(p, index=tidx).groupby(lambda t: t.date()).max()
     peak_err = np.mean(np.abs(peak_p - peak_t) / peak_t)
     print(f'검증 MAE {mae:.0f}대 (기준 {mae_b:.0f}대), 일 최대 오차 {peak_err:.1%}')
 
-    m = fit(X, y)  # 전체로 다시 학습
+    m = fit(X, y) if a.source == 'file2024' else Blend().fit(X, y)  # 전체로 다시 학습
 
     # 혼잡 등급 경계: 학습 기간 9~21시 점유의 분위수
     day_occ = y[(y.index.hour >= 9) & (y.index.hour <= 21)]
@@ -183,7 +245,7 @@ def main():
     wfut['temp'] = wfut['temp'].fillna(pd.Series(fut_idx.hour, index=fut_idx).map(clim))
     wfut['rain'] = wfut['rain'].fillna(0)
     Xf = make_X(fut_idx, wfut, ev)
-    pf = np.clip(m.predict(Xf[FEATS]), 0, None)
+    pf = np.clip(m.predict(Xf[FEATS]) if a.source == 'file2024' else m.predict(Xf), 0, None)
     season_note = ''
     if a.source == 'file2024':
         mf = month_factors(train_month=7)
@@ -218,7 +280,9 @@ def main():
     effect = [{'label': l, 'v': float(daily.peak[mk].mean()), 'n': int(mk.sum())} for l, mk in groups if mk.sum() > 0]
 
     sources = [
-        {'name': '올림픽공원 입출차 정보', 'org': '한국체육산업개발(주)', 'use': '시간대별 주차 대수 계산·학습', 'url': 'https://www.data.go.kr/data/15138735/fileData.do'},
+        ({'name': '올림픽공원 입출차정보(2025)', 'org': '한국체육산업개발(주) · 문화데이터광장', 'use': '2025년 1년치 시간대별 주차 대수 계산·학습', 'url': 'https://www.culture.go.kr/data/openapi/openapiView.do?id=659&gubun=A'}
+         if a.source != 'file2024' else
+         {'name': '올림픽공원 입출차 정보', 'org': '한국체육산업개발(주)', 'use': '시간대별 주차 대수 계산·학습', 'url': 'https://www.data.go.kr/data/15138735/fileData.do'}),
         {'name': '올림픽공원 공연정보', 'org': '한국체육산업개발(주)', 'use': '공연 일정·시작 시각·공연장 (공공데이터포털 등록, 올림픽공원 홈페이지 제공)', 'url': 'https://www.data.go.kr/data/3037877/openapi.do'},
         {'name': '주차장 혼잡도 정보', 'org': '한국체육산업개발(주)', 'use': '구역별 만차 시간 패턴', 'url': 'https://www.data.go.kr/data/15164156/fileData.do'},
         {'name': '월별주차현황', 'org': '한국체육산업개발(주)', 'use': '계절별 방문 수요 보정', 'url': 'https://www.data.go.kr/data/15131671/fileData.do'},
@@ -232,7 +296,9 @@ def main():
             {'value': f'{peak_err:.0%}', 'label': '하루 최대 주차 대수 오차율'},
             {'value': f'{len(io):,}건', 'label': '학습한 입출차 기록'},
         ],
-        'metricNote': f'학습 기간 마지막 {test_days}일을 떼어 두고, 앞부분만으로 학습한 모델이 그 기간을 얼마나 맞히는지 쟀습니다. '
+        'metricNote': (f'학습 기간 마지막 {test_days}일을 떼어 두고, 앞부분만으로 학습한 모델이 그 기간을 얼마나 맞히는지 쟀습니다. '
+                       if a.source == 'file2024' else
+                       f'2025년 기록이 온전한 {len(set(y.index.month))}개 달({len(peak_t)}일)을 한 달씩 떼어 두고, 나머지 달로만 학습한 모델이 그 달을 얼마나 맞히는지 쟀습니다. ') +
                       f'비교 기준은 휴일 여부와 시간대만 보는 평균값(오차 {mae_b:.0f}대)입니다.',
         'seasonNote': season_note,
         'effect': effect,
