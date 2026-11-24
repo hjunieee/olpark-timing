@@ -50,7 +50,7 @@ def _times(seg: str):
         if ap in ('오후', 'PM') and h < 12: h += 12
         if ap is None and 1 <= h <= 9: h += 12   # "7시" 같은 표기는 저녁 공연으로 본다
         if 9 <= h <= 23: out.append(h * 60 + mm)
-    for m in re.finditer(r'(\d{1,2})\s*(AM|PM)', s):
+    for m in re.finditer(r'(?<![:\d])(\d{1,2})\s*(AM|PM)', s):
         h = int(m.group(1)) + (12 if m.group(2) == 'PM' and int(m.group(1)) < 12 else 0)
         if 9 <= h <= 23 and h * 60 not in out: out.append(h * 60)
     return out
@@ -58,13 +58,16 @@ def _times(seg: str):
 
 def parse_start_times(tm: str):
     """'토 오후 6시 / 일 오후 5시' → {'토':[1080], '일':[1020], '*':[...]}"""
-    tm = (tm or '')
+    tm = re.sub(r'(\d{1,2}:\d{2}):\d{2}', r'\1', tm or '')
     for en, ko in EN_DOW.items():
         tm = re.sub(en, ko, tm, flags=re.I)
     tm = re.sub(r'\d{4}[.\-년]\s*\d{1,2}[.\-월]\s*\d{1,2}[.일]?', ' ', tm)  # 날짜 제거
     tm = re.sub(r'\d{1,2}\s*월\s*\d{1,2}\s*일', ' ', tm)
     tm = re.sub(r'\d{1,2}\s*[./]\s*\d{1,2}\s*\.?', ' ', tm)   # 11.28 같은 짧은 날짜
     tm = re.sub(r'(\d)\s*(월|일)(?![가-힣])', r'\1 ', tm)     # 남은 'N월', 'N일' 숫자 표기
+    # '3월 15일(토) ~ 3월 16일(일)  토 오후 6시 / 일 오후 5시': 괄호 속 요일은 기간 표시일 뿐이다
+    if re.search(r'(?<![(가-힣])[월화수목금토일]\s*(?:요일)?\s*(?:오전|오후)?\s*\d', tm):
+        tm = re.sub(r'\(\s*[월화수목금토일]\s*\)', ' ', tm)
     # 요일 표시('토', '(일)', '수목금', '토요일')마다 구간을 나눈다. 단어 속 글자(일반, 매일)는 제외.
     marks = list(re.finditer(r'(?<![가-힣])([월화수목금토일]{1,3})(?:요일)?(?![가-힣])', tm))
     res = {}
@@ -92,6 +95,35 @@ def parse_start_times(tm: str):
     return {k: v for k, v in res.items() if v}
 
 
+DATE_FULL = re.compile(r'(?:(\d{4})\s*[.년\-]\s*)?(?<![\d:])(\d{1,2})\s*(?:월\s*|\.)(\d{1,2})(?!\d)\s*(?:일|\.)?')
+DATE_DAY = re.compile(r'(?<![\d:.])(\d{1,2})\s*일(?![가-힣])')
+
+
+def parse_dated_times(tm: str, days):
+    """'2026년 12월 12일(토) 6시 / 2026년 12월 13() 5시'처럼 날짜를 적은 경우 → {날짜: [분]}.
+    '3월 15일 ~ 3월 16일 토 6시 / 일 5시'처럼 기간만 적은 경우는 빈 값을 돌려 요일 해석에 맡긴다.
+    날짜 표기가 공연 기간과 어긋나면(오타) 같은 '일'을 가진 공연일에 붙인다."""
+    tm = re.sub(r'(\d{1,2}:\d{2}):\d{2}', r'\1', tm or '')
+    ms = [(m.start(), m.end(), int(m.group(2)), int(m.group(3))) for m in DATE_FULL.finditer(tm)
+          if 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(3)) <= 31]
+    for m in DATE_DAY.finditer(tm):          # '| 26일(금)'처럼 달을 생략한 날짜
+        if not any(a <= m.start() < b for a, b, _, _ in ms) and 1 <= int(m.group(1)) <= 31:
+            ms.append((m.start(), m.end(), None, int(m.group(1))))
+    ms.sort()
+    if any(re.match(r'\s*(\([^)]*\))?\s*~', tm[b:]) for _, b, _, _ in ms):
+        return {}
+    out, last_mo = {}, None
+    for i, (a, b, mo, dd) in enumerate(ms):
+        mo = mo or last_mo; last_mo = mo
+        ts = _times(tm[b: ms[i + 1][0] if i + 1 < len(ms) else len(tm)])
+        if not ts: continue
+        hit = [d for d in days if d.month == mo and d.day == dd] or [d for d in days if d.day == dd]
+        if len(hit) == 1:
+            out.setdefault(hit[0], [])
+            out[hit[0]] += [t for t in ts if t not in out[hit[0]]]
+    return out
+
+
 def expand_events(events):
     """공연 목록(beginDt, endDt, tm, plc, title, ndTm) → 날짜별 회차 리스트."""
     rows = []
@@ -103,6 +135,7 @@ def expand_events(events):
         if len(days) > 45:   # 장기 전시·상설 행사는 하루 영향이 작아 제외
             continue
         st = parse_start_times(e.get('tm', ''))
+        dated = parse_dated_times(e.get('tm', ''), days)
         venue, w, big = venue_info(e.get('plc', ''))
         dur = DUR_MIN
         m = re.search(r'(\d{2,3})\s*분', e.get('ndTm') or '')
@@ -112,7 +145,7 @@ def expand_events(events):
         reg = pd.to_datetime((e.get('regDate') or '')[:10], errors='coerce')
         for d in days:
             dch = DOW_CH[d.dayofweek]
-            ts = st.get(dch) or st.get('*')
+            ts = dated.get(d) or (None if dated and len(dated) >= len(days) else st.get(dch) or st.get('*'))
             if not ts:
                 if st and any(k in DOW_CH for k in st):  # 요일이 지정됐는데 이 요일이 없으면 공연 없음
                     continue

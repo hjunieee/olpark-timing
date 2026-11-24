@@ -14,6 +14,9 @@ sys.path.insert(0, str(__import__('pathlib').Path(__file__).parent))
 from common import *  # noqa
 
 DATA_DIR = ROOT / 'raw'                # 공공데이터 원자료 사본
+CAP = 2200                             # 동2문·남2문·북2문 주차장 수용 대수(기관 실시간 주차현황 표기)
+MAIN_GATES = ('동2문', '남2문', '북2문')
+LEVEL_PCT = (0.3, 0.5, 0.7, 0.9)       # 기관 '주차장 예상 이용률' 범례: 50% 다소혼잡, 70% 혼잡, 90% 만차
 LAT, LON = 37.5207, 127.1214
 UA = {'User-Agent': 'Mozilla/5.0 (olpark-timing data build)'}
 
@@ -29,15 +32,17 @@ def hourly_occupancy(io: pd.DataFrame, start, end):
     return pd.Series(occ, index=idx, name='occ')
 
 
-def occ_2025(t0, t1):
+def occ_2025(t0, t1, main_lots=True):
     """2025 시간별 주차 대수. raw/occ_2025.json(집계본, 커밋함)이 있으면 쓰고, 없으면 API 캐시에서 만든다.
     집계본에는 시간별 대수만 들어 있어 차량 단위 기록·키가 저장소에 남지 않는다."""
     p = DATA_DIR / 'occ_2025.json'
-    if not p.exists():
+    if not p.exists() or 'occ3' not in load_json(p):
         import fetch_api
         io = fetch_api.load_io_2025()
         io = io[(io['in'] >= t0) & (io['in'] <= t1 + ' 23:59:59')]
         y = hourly_occupancy(io, t0, t1 + ' 23:00')
+        main = io[io.gin.str.extract(r'^(\S+?문)')[0].isin(MAIN_GATES)]
+        y3 = hourly_occupancy(main, t0, t1 + ' 23:00')
         # API는 달마다 최대 65,534건만 준다. 그 상한에 걸린 달은 표본(8·9월)이거나 앞 며칠만(11·12월) 들어 있다.
         day_n = io['in'].dt.normalize().value_counts()
         valid = []
@@ -47,12 +52,14 @@ def occ_2025(t0, t1):
                 if len(g) >= 25: continue                      # 한 달 전체에서 뽑은 표본 → 대수가 맞지 않아 뺀다
                 g = g.iloc[:-1]                                 # 마지막 날은 중간에 잘렸다
             valid += [d.strftime('%Y-%m-%d') for d in g.index]
-        save_json({'start': t0, 'records': int(len(io)), 'occ': [int(v) for v in y.values], 'validDays': sorted(valid),
+        save_json({'start': t0, 'records': int(len(io)), 'records3': int(len(main)), 'occ': [int(v) for v in y.values],
+                   'occ3': [int(v) for v in y3.values], 'validDays': sorted(valid),
                    'source': '문화데이터광장 OpenAPI 659 올림픽공원 입출차정보(2025)'}, p)
     d = load_json(p)
-    y = pd.Series(d['occ'], index=pd.date_range(d['start'], periods=len(d['occ']), freq='h'), name='occ')
+    key = 'occ3' if main_lots else 'occ'
+    y = pd.Series(d[key], index=pd.date_range(d['start'], periods=len(d[key]), freq='h'), name='occ')
     y = y[y.index.normalize().isin(pd.to_datetime(d['validDays']))]
-    return y, d['records']
+    return y, (d['records3'] if main_lots else d['records'])
 
 
 def load_io_file2024():
@@ -248,7 +255,7 @@ def main():
         t0, t1 = '2025-01-01', '2025-12-31'
         y, n_rec = occ_2025(t0, t1)
         io = range(n_rec)
-        trained_on = f'2025년 올림픽공원 입출차 {n_rec / 10000:.0f}만 건(1년치)'
+        trained_on = f'2025년 동2문·남2문·북2문 입출차 {n_rec / 10000:.0f}만 건(1년치)'
         test_days = 61   # 11~12월을 검증용으로 뗀다
     if a.source == 'file2024':
         y = hourly_occupancy(io, t0, t1 + ' 23:00')
@@ -292,6 +299,22 @@ def main():
     peak_err_b = np.mean(np.abs(pb - peak_t) / peak_t)
     dd = pd.Series((X[te].dome > 0).values, index=tidx).groupby(lambda t: t.date()).max()
     pe_d, pe_db = np.mean((np.abs(peak_p - peak_t) / peak_t)[dd]), np.mean((np.abs(pb - peak_t) / peak_t)[dd])
+    grade = {}
+    if a.source != 'file2024':
+        thd = [CAP * r for r in LEVEL_PCT]
+        g = lambda v: np.searchsorted(thd, v, side='right')
+        gt, gp, gb = g(peak_t.values), g(peak_p.values), g(pb.values)
+        full = gt >= 4
+        grade = {'acc': float(np.mean(gt == gp)), 'accBase': float(np.mean(gt == gb)),
+                 'within1': float(np.mean(np.abs(gt - gp) <= 1)), 'within1Base': float(np.mean(np.abs(gt - gb) <= 1)),
+                 'fullDays': int(full.sum()), 'fullCaught': int((gp[full] >= 3).sum()), 'fullCaughtBase': int((gb[full] >= 3).sum()),
+                 'falseAlarm': int(((gp >= 3) & (gt <= 1)).sum()), 'days': int(len(gt)),
+                 'flag': int((gp >= 3).sum()), 'flagBase': int((gb >= 3).sum()),
+                 'flagHit': int(((gp >= 3) & (gt >= 3)).sum()), 'flagHitBase': int(((gb >= 3) & (gt >= 3)).sum()),
+                 'actualBusy': int((gt >= 3).sum()),
+                 'full_pred': int((gp >= 4).sum()), 'full_predHit': int(((gp >= 4) & full).sum()),
+                 'full_predBase': int((gb >= 4).sum()), 'full_predHitBase': int(((gb >= 4) & full).sum())}
+        print('등급', grade)
     print(f'휴일 MAE {mae_o:.0f}대 (기준 {mae_ob:.0f}대, {1 - mae_o / mae_ob:.1%} 감소), 일 최대 오차 {peak_err:.1%} (기준 {peak_err_b:.1%}), 공연 날 일 최대 오차 {pe_d:.1%} (기준 {pe_db:.1%})')
     print(f'검증 MAE {mae:.0f}대 (기준 {mae_b:.0f}대), 일 최대 오차 {peak_err:.1%}')
 
@@ -300,9 +323,13 @@ def main():
     # 혼잡 등급 경계: 학습 기간 9~21시 점유의 분위수
     day_occ = y[(y.index.hour >= 9) & (y.index.hour <= 21)]
     th = [float(np.percentile(day_occ, q)) for q in (40, 75, 92, 98.5)]
+    if a.source != 'file2024':
+        th = [CAP * r for r in LEVEL_PCT]
     peaks = y[(y.index.hour >= 6)].groupby(y.index[(y.index.hour >= 6)].date).max()
     typical = float(np.median(peaks))                      # 보통 날의 하루 최대 대수
     th_day = [typical * r for r in (0.9, 1.1, 1.3, 1.6)]   # 한산/보통/붐빔/혼잡/매우 혼잡 경계
+    if a.source != 'file2024':
+        th_day = list(th)                                  # 하루 등급도 그날 최대 이용률로 정한다
     if a.source == 'file2024':
         mf0 = month_factors(train_month=7)
         k = float(np.mean(list(mf0.values())))   # 7월 기준 → 연평균 기준
@@ -348,7 +375,9 @@ def main():
                      'holiday': KR_HOL.get(d) or ''})
 
     gen = (dt.datetime.now(dt.UTC).replace(tzinfo=None) + dt.timedelta(hours=9)).strftime('%Y-%m-%d %H:%M KST')
-    save_json({'generated': gen, 'trainedOn': trained_on, 'thresholds': th, 'dayThresholds': th_day, 'days': days}, SITE_DATA / 'forecast.json')
+    save_json({'generated': gen, 'trainedOn': trained_on, 'thresholds': th, 'dayThresholds': th_day, 'days': days,
+               'capacity': CAP if a.source != 'file2024' else None,
+               'scope': '동2문·남2문·북2문 주차장' if a.source != 'file2024' else '올림픽공원 전체 주차장'}, SITE_DATA / 'forecast.json')
 
     # 공연 효과 요약 (학습 기간 실측)
     daily = pd.DataFrame({'peak': y.groupby(y.index.date).max()})
@@ -359,7 +388,7 @@ def main():
     effect = [{'label': l, 'v': float(daily.peak[mk].mean()), 'n': int(mk.sum())} for l, mk in groups if mk.sum() > 0]
 
     sources = [
-        ({'name': '올림픽공원 입출차정보(전체구역, 2025)', 'org': '한국체육산업개발(주)', 'use': '240만 건으로 시간대별 주차 대수 계산·학습 (공공데이터포털 15159093, 문화데이터광장 API로 제공)', 'url': 'https://www.data.go.kr/data/15159093/openapi.do'}
+        ({'name': '올림픽공원 입출차정보(전체구역, 2025)', 'org': '한국체육산업개발(주)', 'use': '240만 건 중 동2문·남2문·북2문 197만 건으로 시간대별 주차 대수 계산·학습 (공공데이터포털 15159093, 문화데이터광장 API로 제공)', 'url': 'https://www.data.go.kr/data/15159093/openapi.do'}
          if a.source != 'file2024' else
          {'name': '올림픽공원 입출차 정보', 'org': '한국체육산업개발(주)', 'use': '시간대별 주차 대수 계산·학습', 'url': 'https://www.data.go.kr/data/15138735/fileData.do'}),
         {'name': '올림픽공원 공연정보', 'org': '한국체육산업개발(주)', 'use': '공연 일정·시작 시각·공연장 (공공데이터포털 등록, 올림픽공원 홈페이지 제공)', 'url': 'https://www.data.go.kr/data/3037877/openapi.do'},
@@ -386,11 +415,13 @@ def main():
                        'peakErr': round(float(pe_d), 3), 'peakErrBase': round(float(pe_db), 3)},
         'offMetric': {'mae': round(float(mae_o)), 'base': round(float(mae_ob)), 'days': int(len(set(X[te].index[off_m].date)))},
         'peakErrBase': round(float(peak_err_b), 3),
+        'grade': grade,
         'seasonNote': season_note,
         'effect': effect,
         'effectNote': '학습 기간의 실제 하루 최대 주차 대수 평균입니다. 대형 공연은 KSPO DOME·핸드볼경기장·잔디마당 등 수천 명 규모 공연입니다.',
         'sources': sources,
         **monthly_trend(),
+        'impact': load_json(DATA_DIR / 'impact_2025.json') if (DATA_DIR / 'impact_2025.json').exists() else None,
     }
     save_json(stats, SITE_DATA / 'stats.json')
     build_zones()

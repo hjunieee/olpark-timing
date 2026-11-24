@@ -1,5 +1,5 @@
 'use strict';
-const LV = ['한산', '보통', '붐빔', '혼잡', '매우 혼잡'];
+const LV = ['여유', '보통', '다소 혼잡', '혼잡', '만차'];
 const DOW = ['일', '월', '화', '수', '목', '금', '토'];
 const $ = (s) => document.querySelector(s);
 const state = { fc: null, stats: null, zones: null, live: null, byDate: {}, date: null, month: null };
@@ -10,6 +10,8 @@ const parse = (s) => { const [y, m, d] = s.split('-').map(Number); return new Da
 const kstToday = () => { const n = new Date(Date.now() + (9 * 60 + new Date().getTimezoneOffset()) * 60000); return ymd(n); };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n) => Math.round(n).toLocaleString('ko-KR');
+const pct = (v) => (state.fc && state.fc.capacity ? ` (정원의 ${Math.round(v / state.fc.capacity * 100)}%)` : '');
+const arriveText = (hours) => bestSlots(hours).good.map((g) => `${g.h}~${g.h + 2}시`).join(' 또는 ');
 
 function levelOf(cars, day = false) {
   const th = (day && state.fc.dayThresholds) || state.fc.thresholds; // 4 boundaries
@@ -51,7 +53,7 @@ function renderDay() {
   const isToday = d.date === kstToday();
   $('#dateLabel').textContent = `${dt.getMonth() + 1}월 ${dt.getDate()}일 (${DOW[dt.getDay()]})${d.holiday ? ' · ' + d.holiday : ''}${isToday ? ' · 오늘' : ''}`;
   const lv = levelOf(d.peak, true);
-  $('#dayLevel').innerHTML = `<span class="badge lv${lv}">${LV[lv]}</span> 최대 약 ${fmt(d.peak)}대`;
+  $('#dayLevel').innerHTML = `<span class="badge lv${lv}">${LV[lv]}</span> 최대 약 ${fmt(d.peak)}대<small class="pct">${pct(d.peak)}</small>`;
   const w = d.wx || {};
   $('#dayWx').innerHTML = w.tmax != null
     ? `<b>${Math.round(w.tmin)}° / ${Math.round(w.tmax)}°</b>${w.rain > 0.5 ? `비 ${w.rain.toFixed(0)}mm` : w.pop != null ? `강수확률 ${w.pop}%` : '비 소식 없음'}<br><small>${esc(w.src || '')}</small>`
@@ -63,7 +65,7 @@ function renderDay() {
   let adv;
   if (bigEv.length) {
     const e = bigEv[0];
-    adv = `${esc(e.place)}에서 ${esc(e.title)} 공연이 있습니다. 공연 시작 2시간 전부터 주차장이 빠르게 찹니다. ${s.good[0].h}시 무렵 도착하거나 대중교통(5·8호선 올림픽공원역, 8호선 몽촌토성역)을 권합니다.`;
+    adv = `${esc(e.place)}에서 ${esc(e.title)} 공연이 있습니다. 공연 시작 2시간 전부터 주차장이 빠르게 찹니다. ${arriveText(d.hours)}에 도착하거나 대중교통(5·8호선 올림픽공원역, 8호선 몽촌토성역)을 권합니다.`;
   } else if (lv >= 3) {
     adv = `평소보다 붐비는 날입니다. ${peakH}시 전후가 가장 붐빕니다. ${s.good[0].h}시 무렵 도착을 권합니다.`;
   } else if (lv === 2) {
@@ -81,18 +83,19 @@ function renderDay() {
     : '<li><span class="none">등록된 공연이 없습니다.</span></li>';
 
   drawBars('#hourChart', d.hours.map((v, h) => ({
-    v, label: h % 3 === 0 ? `${h}` : '', tip: `${h}시 약 ${fmt(v)}대`, cls: `lv${levelOf(v)}`,
+    v, label: h % 3 === 0 ? `${h}` : '', tip: `${h}시 약 ${fmt(v)}대${pct(v)}`, cls: `lv${levelOf(v)}`,
     mark: d.events.some((e) => e.startH === h) ? '🎤' : '',
-  })));
-  $('#chartNote').textContent = '가로축은 시각(0~23시), 막대는 그 시각 주차장에 머무는 예상 차량 대수입니다. 🎤는 공연 시작 시각입니다.';
+  })), Math.max(...d.hours, state.fc.capacity || 0) * 1.12, state.fc.capacity);
+  $('#chartNote').textContent = `가로축은 시각(0~23시), 막대는 그 시각 ${state.fc.scope || '주차장'}에 머무는 예상 차량 대수입니다. 점선은 정원(${fmt(state.fc.capacity || 0)}대)입니다. 🎤는 공연 시작 시각입니다.`;
 }
 
-function drawBars(sel, items, maxV) {
+function drawBars(sel, items, maxV, capLine) {
   const el = $(sel);
   const max = maxV || Math.max(...items.map((i) => i.v)) * 1.12 || 1;
   const step = max > 2000 ? 1000 : max > 800 ? 500 : 200;
   let gl = '';
   for (let g = step; g < max; g += step) gl += `<div class="gl" style="bottom:${22 + (g / max) * (el.clientHeight - 30)}px"><em>${fmt(g)}</em></div>`;
+  if (capLine) gl += `<div class="capline" style="bottom:${22 + (capLine / max) * (el.clientHeight - 30)}px"><em>정원 ${fmt(capLine)}</em></div>`;
   el.innerHTML = gl + items.map((i) =>
     `<div class="bar ${i.cls}" tabindex="0" data-tip="${esc(i.tip)}" style="height:${Math.max(1, (i.v / max) * 100)}%">${i.mark ? `<i class="ev">${i.mark}</i>` : ''}${i.val ? `<b class="val">${esc(i.val)}</b>` : ''}<span>${esc(i.label)}</span></div>`).join('');
 }
@@ -160,15 +163,15 @@ function opsDays() {
   const th = state.fc.thresholds;          // 시간 단위 등급 경계
   return state.fc.days.map((d) => {
     const lv = levelOf(d.peak, true), big = d.events.filter((e) => e.big);
-    const win = busyWindow(d.hours, th[2]) || (lv >= 3 ? busyWindow(d.hours, th[1]) : null);
+    const win = busyWindow(d.hours, th[2]) || busyWindow(d.hours, th[1]);
     return { d, lv, big, win };
-  }).filter((x) => x.lv >= 3 || (x.big.length && x.lv >= 2));
+  }).filter((x) => x.lv >= 3);
 }
 function noticeText(x) {
   const dt = parse(x.d.date), md = `${dt.getMonth() + 1}월 ${dt.getDate()}일(${DOW[dt.getDay()]})`;
   const w = x.win ? `${x.win[0]}~${x.win[1]}시` : '오후';
   const ev = x.big.length ? ` ${x.big[0].place}에서 '${x.big[0].title}' 공연이 있습니다.` : '';
-  return `[주차 혼잡 예보] ${md} ${w} 올림픽공원 주차장이 ${LV[x.lv]}할 것으로 예상됩니다.${ev} 방문 시 ${TRANSIT}을 이용해 주시고, 차량은 ${x.win && x.win[0] > 10 ? x.win[0] - 2 + '시 이전' : '오전'}에 도착하시기 바랍니다.`;
+  return `[주차 혼잡 예보] ${md} ${w} 올림픽공원 주차장(${state.fc.scope || '주요 주차장'})이 ${LV[x.lv]}${x.lv === 4 ? '될' : '할'} 것으로 예상됩니다(최대 약 ${fmt(x.d.peak)}대${pct(x.d.peak)}).${ev} 방문 시 ${TRANSIT}을 이용해 주시고, 차량은 ${arriveText(x.d.hours)}에 도착하시기 바랍니다.`;
 }
 function renderOps() {
   const list = opsDays();
@@ -176,7 +179,7 @@ function renderOps() {
   $('#opsList').innerHTML = list.map((x, i) => {
     const dt = parse(x.d.date), w = x.win;
     const acts = [];
-    if (w) acts.push(`주차 안내 인력: <b>${Math.max(7, w[0] - 1)}~${w[1]}시</b> 증원 (예상 최대 ${fmt(x.d.peak)}대)`);
+    if (w) acts.push(`주차 안내 인력: <b>${Math.max(7, w[0] - 1)}~${w[1]}시</b> 증원 (예상 최대 ${fmt(x.d.peak)}대${pct(x.d.peak)})`);
     if (x.lv >= 4) acts.push('임시 주차장 개방·진입 통제 계획 준비');
     if (x.big.length) acts.push(`공연 종료 예상 ${x.big.map((e) => e.end).join('·')} 전후 출차 유도`);
     acts.push('3일 전 홈페이지 핫뉴스·SNS 공지 (아래 문안)');
@@ -219,6 +222,16 @@ function renderAbout() {
   if (s.effect) {
     drawBars('#effectChart', s.effect.map((e, i) => ({ v: e.v, label: e.label, tip: `${e.label}: 하루 최대 평균 ${fmt(e.v)}대 (${e.n}일)`, val: `${fmt(e.v)}대`, cls: `lv${Math.min(4, i)}` })));
     $('#effectNote').textContent = s.effectNote || '';
+  }
+  if (s.impact) {
+    const I = s.impact, a = I.sim[0], b = I.sim[1];
+    $('#impact').innerHTML = [
+      [`${I.fullDays}일`, `2025년 만차 날(정원 90% 이상), 그중 휴일 ${I.fullDaysOff}일`],
+      [`${I.overCapHours}시간`, '정원 2,200대를 넘긴 시간'],
+      [`${Math.round(a.red * 100)}%`, `붐비는 시간 도착 차량 ${a.share * 100}%가 추천 시간으로 옮기면 줄어드는 정원 초과량`],
+      [`${Math.round(b.red * 100)}%`, `${b.share * 100}%가 옮기면`],
+    ].map(([v, l]) => `<div class="metric"><b>${v}</b><span>${l}</span></div>`).join('');
+    $('#impactNote').textContent = `모의 계산입니다. ${I.method} 정원 초과량은 정원을 넘은 차량 수를 시간마다 더한 값(${fmt(a.excess0)}대·시간)입니다.`;
   }
   if (s.monthly) {
     const mx = Math.max(...s.monthly.map((x) => x.v));
